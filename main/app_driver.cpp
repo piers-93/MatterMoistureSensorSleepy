@@ -27,7 +27,7 @@ static constexpr char *TAG = "app_driver";
 
 /* Battery measurement configuration */
 #define BATTERY_ADC_CHANNEL     ADC_CHANNEL_0  // GPIO1
-#define VOLTAGE_DIVIDER_RATIO   4.0f           // 300k/100k = 3:1 → Vbat = Vadc * 4
+#define VOLTAGE_DIVIDER_RATIO   1.33f           // 330k oben, 1M unten: (330k + 1M)/1M
 
 
 static bool measurement_in_progress = false;
@@ -151,7 +151,7 @@ float app_driver_get_moisture_percentage()
         adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw, &voltage);
     } else {
         /* Rough conversion without calibration */
-        voltage = adc_raw * 3300 / 4095;
+        float voltage = (float)adc_raw * 3300.0f / 4095.0f;
     }
     
     ESP_LOGI(TAG, "ADC raw: %d, Voltage: %d mV", adc_raw, voltage);
@@ -159,7 +159,7 @@ float app_driver_get_moisture_percentage()
     /* Convert voltage to moisture percentage (0-100%)
      * Higher voltage = drier soil, lower voltage = wetter soil
      */
-    moisture = 100.0f - ((float)(voltage - MOISTURE_WET_VALUE) / (MOISTURE_DRY_VALUE - MOISTURE_WET_VALUE) * 100.0f);
+    float moisture = 100.0f - ((float)(voltage - MOISTURE_WET_VALUE) / (MOISTURE_DRY_VALUE - MOISTURE_WET_VALUE) * 100.0f);
     
     /* Clamp to 0-100% range */
     if (moisture < 0) moisture = 0;
