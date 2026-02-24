@@ -27,7 +27,7 @@ static constexpr char *TAG = "app_driver";
 
 /* Battery measurement configuration */
 #define BATTERY_ADC_CHANNEL     ADC_CHANNEL_0  // GPIO1
-#define VOLTAGE_DIVIDER_RATIO   1.33f           // 330k oben, 1M unten: (330k + 1M)/1M
+#define VOLTAGE_DIVIDER_RATIO   1.4256f           // 4.7M oben, 2M unten: (4.7M + 2M)/2M
 
 
 static bool measurement_in_progress = false;
