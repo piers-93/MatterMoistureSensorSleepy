@@ -28,6 +28,8 @@ static constexpr char *TAG = "app_driver";
 /* Battery measurement configuration */
 #define BATTERY_ADC_CHANNEL     ADC_CHANNEL_0  // GPIO1
 #define VOLTAGE_DIVIDER_RATIO   1.4256f           // 4.7M oben, 2M unten: (4.7M + 2M)/2M
+#define BATTERY_FULL_VOLTAGE    4.2f              // Fully charged battery voltage
+#define BATTERY_EMPTY_VOLTAGE   3.0f              // Empty battery voltage
 
 
 static bool measurement_in_progress = false;
@@ -159,7 +161,7 @@ float app_driver_get_moisture_percentage()
     /* Convert voltage to moisture percentage (0-100%)
      * Higher voltage = drier soil, lower voltage = wetter soil
      */
-    float moisture = 100.0f - ((float)(voltage - MOISTURE_WET_VALUE) / (MOISTURE_DRY_VALUE - MOISTURE_WET_VALUE) * 100.0f);
+    moisture = 100.0f - ((float)(voltage - MOISTURE_WET_VALUE) / (MOISTURE_DRY_VALUE - MOISTURE_WET_VALUE) * 100.0f);
     
     /* Clamp to 0-100% range */
     if (moisture < 0) moisture = 0;
@@ -285,4 +287,20 @@ float app_driver_get_battery_voltage()
     adc_oneshot_del_unit(adc1_handle);
     
     return battery_voltage;
+}
+
+/**
+ * @brief Convert battery voltage to percentage
+ * 
+ * @param voltage Battery voltage in volts
+ * @return Battery percentage (0-100%)
+ */
+float app_driver_battery_voltage_to_percent(float voltage)
+{
+    float percent = ((voltage - BATTERY_EMPTY_VOLTAGE) / (BATTERY_FULL_VOLTAGE - BATTERY_EMPTY_VOLTAGE)) * 100.0f;
+    
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    
+    return percent;
 }

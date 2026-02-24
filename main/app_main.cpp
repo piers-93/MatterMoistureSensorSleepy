@@ -161,10 +161,8 @@ static void measurement_timer_callback(void* arg)
     ESP_LOGI(TAG, "Reading battery voltage...");
     float battery_voltage = app_driver_get_battery_voltage();
     
-    /* Convert to battery percentage (3.0V = 100%, 2.0V = 0%) */
-    float battery_percent = ((battery_voltage - 2.0f) / 1.0f) * 100.0f;
-    if (battery_percent < 0) battery_percent = 0;
-    if (battery_percent > 100) battery_percent = 100;
+    /* Convert to battery percentage (4.2V = 100%, 3.0V = 0%) */
+    float battery_percent = app_driver_battery_voltage_to_percent(battery_voltage);
     
     /* Update Matter PowerSource attributes */
     /* BatPercentRemaining: 0-200 (0.5% resolution, 200 = 100%) */
@@ -172,13 +170,13 @@ static void measurement_timer_callback(void* arg)
     esp_matter_attr_val_t bat_percent_val = esp_matter_nullable_uint8(bat_percent_remaining);
     attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, &bat_percent_val);
     
-    /* BatVoltage: in decivolts (e.g., 30 = 3.0V) */
-    uint32_t bat_voltage_dv = (uint32_t)(battery_voltage * 10);
-    esp_matter_attr_val_t bat_voltage_val = esp_matter_nullable_uint32(bat_voltage_dv);
+    /* BatVoltage: in millivolts (e.g., 3940 = 3.94V) */
+    uint32_t bat_voltage_mv = (uint32_t)(battery_voltage * 1000);
+    esp_matter_attr_val_t bat_voltage_val = esp_matter_nullable_uint32(bat_voltage_mv);
     attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatVoltage::Id, &bat_voltage_val);
     
-    ESP_LOGI(TAG, "✓ Battery: %.2fV (%.0f%%) - Matter: BatPercentRemaining=%d, BatVoltage=%u", 
-             battery_voltage, battery_percent, bat_percent_remaining, bat_voltage_dv);
+    ESP_LOGI(TAG, "✓ Battery: %.2fV (%.0f%%) - Matter: BatPercentRemaining=%d, BatVoltage=%u mV", 
+             battery_voltage, battery_percent, bat_percent_remaining, bat_voltage_mv);
 }
 
 extern "C" void app_main()
@@ -225,8 +223,8 @@ extern "C" void app_main()
         cluster::power_source::attribute::create_order(power_source_cluster, 0, 0, 255);
         cluster::power_source::attribute::create_description(power_source_cluster, "Battery", 7);
         
-        // Battery-specific attributes (with min/max values)
-        cluster::power_source::attribute::create_bat_voltage(power_source_cluster, nullable<uint32_t>(30), nullable<uint32_t>(0), nullable<uint32_t>(50));
+        // Battery-specific attributes (in millivolts: 3000-4200 mV for LiPo)
+        cluster::power_source::attribute::create_bat_voltage(power_source_cluster, nullable<uint32_t>(3700), nullable<uint32_t>(3000), nullable<uint32_t>(4200));
         cluster::power_source::attribute::create_bat_percent_remaining(power_source_cluster, nullable<uint8_t>(200), nullable<uint8_t>(0), nullable<uint8_t>(200));
         cluster::power_source::attribute::create_bat_charge_level(power_source_cluster, (uint8_t)PowerSource::BatChargeLevelEnum::kOk);
         
@@ -261,12 +259,10 @@ extern "C" void app_main()
     /* Perform initial battery measurement */
     ESP_LOGI(TAG, "Performing initial battery measurement...");
     float initial_battery_voltage = app_driver_get_battery_voltage();
-    float initial_battery_percent = ((initial_battery_voltage - 2.0f) / 1.0f) * 100.0f;
-    if (initial_battery_percent < 0) initial_battery_percent = 0;
-    if (initial_battery_percent > 100) initial_battery_percent = 100;
+    float initial_battery_percent = app_driver_battery_voltage_to_percent(initial_battery_voltage);
     
     uint8_t initial_bat_percent = (uint8_t)(initial_battery_percent * 2);
-    uint32_t initial_bat_voltage = (uint32_t)(initial_battery_voltage * 10);
+    uint32_t initial_bat_voltage = (uint32_t)(initial_battery_voltage * 1000);
     
     esp_matter_attr_val_t bat_percent_val = esp_matter_nullable_uint8(initial_bat_percent);
     attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, &bat_percent_val);
