@@ -3,9 +3,9 @@ menu "Example Configuration"
         int "Moisture Sensor GPIO Pin (ADC Input)"
         range 1 5 if IDF_TARGET_ESP32H2
         range 0 6 if IDF_TARGET_ESP32C6
-        default 2 if IDF_TARGET_ESP32H2
-        default 2 if IDF_TARGET_ESP32C6
-        default 2 if IDF_TARGET_ESP32C5
+        default 3 if IDF_TARGET_ESP32H2
+        default 3 if IDF_TARGET_ESP32C6
+        default 3 if IDF_TARGET_ESP32C5
         help
             GPIO number for the moisture sensor analog input.
             ESP32-H2: GPIO1-5 (ADC1_CH0-CH4)
@@ -15,7 +15,7 @@ menu "Example Configuration"
         int "ADC Channel Number"
         range 0 4 if IDF_TARGET_ESP32H2
         range 0 6 if IDF_TARGET_ESP32C6
-        default 1
+        default 2
         help
             ADC channel for the moisture sensor.
             ESP32-H2: GPIO1=CH0, GPIO2=CH1, GPIO3=CH2, GPIO4=CH3, GPIO5=CH4

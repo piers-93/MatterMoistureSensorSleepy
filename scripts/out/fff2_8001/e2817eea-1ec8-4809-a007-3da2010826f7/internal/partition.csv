@@ -1,0 +1,18 @@
+key,type,encoding,value
+chip-factory,namespace,,
+discriminator,data,u32,2103
+iteration-count,data,u32,10000
+salt,data,string,S6QNJ1mbPon2ZNsHFUL6P7BKWGIGGwS4PKtO3pOrhgw=
+vendor-id,data,u32,65522
+vendor-name,data,string,Piers Matters
+product-id,data,u32,32769
+product-name,data,string,Soil Moisture Sensor
+hardware-ver,data,u32,1
+hw-ver-str,data,string,ICM 7555
+serial-num,data,string,1e1352ee1c72cbdef2a8a83c5614d6ff
+dac-cert,file,binary,/home/patrick/BodenfeuchtigkeitLIT/icd_app/scripts/out/fff2_8001/e2817eea-1ec8-4809-a007-3da2010826f7/internal/DAC_cert.der
+dac-key,file,binary,/home/patrick/BodenfeuchtigkeitLIT/icd_app/scripts/out/fff2_8001/e2817eea-1ec8-4809-a007-3da2010826f7/internal/DAC_private_key.bin
+dac-pub-key,file,binary,/home/patrick/BodenfeuchtigkeitLIT/icd_app/scripts/out/fff2_8001/e2817eea-1ec8-4809-a007-3da2010826f7/internal/DAC_public_key.bin
+pai-cert,file,binary,/home/patrick/BodenfeuchtigkeitLIT/icd_app/scripts/out/fff2_8001/staging/pai_cert.der
+verifier,data,string,W+q0spVmLPE4oi7oZx2qtw06XYq86zYFGyjIf/Anz24EQPLhaeBzgno6uDpFIF+ckehM9k2r4PCes/tULwlFg65GZHaiaZ9AHGufVCXNqn9+e25AjqY44cBWfdIEamumrA==
+cert-dclrn,file,binary,../../../esp-matter/connectedhomeip/connectedhomeip/credentials/test/certification-declaration/Chip-Test-CD-FFF2-8001.der

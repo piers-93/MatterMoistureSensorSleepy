@@ -9,7 +9,6 @@
 #include <esp_err.h>
 #include <esp_log.h>
 #include <nvs_flash.h>
-#include <esp_timer.h>
 #if CONFIG_PM_ENABLE
 #include <esp_pm.h>
 #endif
@@ -25,7 +24,7 @@
 
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
-#include <app/icd/server/ICDNotifier.h>
+#include <app/icd/server/ICDStateObserver.h>
 
 static const char *TAG = "app_main";
 
@@ -36,7 +35,6 @@ using namespace esp_matter::cluster;
 using namespace chip::app::Clusters;
 
 static uint16_t moisture_endpoint_id = 0;
-static esp_timer_handle_t measurement_timer = NULL;
 
 constexpr auto k_timeout_seconds = 300;
 
@@ -129,22 +127,20 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
     return err;
 }
 
-static void measurement_timer_callback(void* arg)
+/**
+ * Perform moisture and battery measurement.
+ * Called from ScheduleWork on the CHIP task when ICD enters active mode.
+ */
+static void perform_measurement(intptr_t)
 {
-    ESP_LOGI(TAG, "=== Timer callback triggered ===");
-    ESP_LOGI(TAG, "=== SINGLE measurement starting ===");
-    
-    /* Notify ICD that we need to be active for this measurement */
-    chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t) {
-        chip::app::ICDNotifier::GetInstance().NotifyNetworkActivityNotification();
-    });
+    ESP_LOGI(TAG, "=== ICD-synced measurement starting ===");
     
     /* Read moisture sensor (sensor will be powered on/off inside this function) */
-    ESP_LOGI(TAG, "Reading moisture sensor...");
     float moisture = app_driver_get_moisture_percentage();
     
-    /* Convert to Matter format (0.01% units) */
-    uint16_t measured_value = (uint16_t)(moisture * 100);
+    /* Round to whole percent, then convert to Matter format (0.01% units) */
+    uint16_t rounded_percent = (uint16_t)(moisture + 0.5f);
+    uint16_t measured_value = rounded_percent * 100;
     
     /* Update Matter attribute */
     esp_matter_attr_val_t val = esp_matter_nullable_uint16(measured_value);
@@ -152,32 +148,50 @@ static void measurement_timer_callback(void* arg)
                      RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, &val);
     
     if (update_err == ESP_OK) {
-        ESP_LOGI(TAG, "✓ Updated moisture: %.1f%% (raw value: %d)", moisture, measured_value);
+        ESP_LOGI(TAG, "Updated moisture: %d%%", rounded_percent);
     } else {
-        ESP_LOGE(TAG, "✗ Failed to update moisture attribute, err: %d", update_err);
+        ESP_LOGE(TAG, "Failed to update moisture attribute, err: %d", update_err);
     }
     
     /* Read battery voltage */
-    ESP_LOGI(TAG, "Reading battery voltage...");
     float battery_voltage = app_driver_get_battery_voltage();
-    
-    /* Convert to battery percentage (4.2V = 100%, 3.0V = 0%) */
     float battery_percent = app_driver_battery_voltage_to_percent(battery_voltage);
     
-    /* Update Matter PowerSource attributes */
     /* BatPercentRemaining: 0-200 (0.5% resolution, 200 = 100%) */
     uint8_t bat_percent_remaining = (uint8_t)(battery_percent * 2);
     esp_matter_attr_val_t bat_percent_val = esp_matter_nullable_uint8(bat_percent_remaining);
     attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, &bat_percent_val);
     
-    /* BatVoltage: in millivolts (e.g., 3940 = 3.94V) */
+    /* BatVoltage: in millivolts */
     uint32_t bat_voltage_mv = (uint32_t)(battery_voltage * 1000);
     esp_matter_attr_val_t bat_voltage_val = esp_matter_nullable_uint32(bat_voltage_mv);
     attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatVoltage::Id, &bat_voltage_val);
     
-    ESP_LOGI(TAG, "✓ Battery: %.2fV (%.0f%%) - Matter: BatPercentRemaining=%d, BatVoltage=%u mV", 
+    ESP_LOGI(TAG, "Battery: %.2fV (%.0f%%), BatPercentRemaining=%d, BatVoltage=%u mV", 
              battery_voltage, battery_percent, bat_percent_remaining, bat_voltage_mv);
 }
+
+/**
+ * ICD State Observer: Synchronizes sensor measurements with Matter ICD wake-up cycles.
+ * Instead of running an independent timer (which causes separate CPU wake-ups),
+ * we piggyback measurements onto the ICD's existing idle->active transitions.
+ * This eliminates redundant wake-ups and reduces power consumption.
+ */
+class MoistureMeasurementObserver : public chip::app::ICDStateObserver
+{
+public:
+    void OnEnterActiveMode() override
+    {
+        ESP_LOGI(TAG, "ICD entered active mode - scheduling measurement");
+        chip::DeviceLayer::PlatformMgr().ScheduleWork(perform_measurement);
+    }
+
+    void OnEnterIdleMode() override {}
+    void OnTransitionToIdle() override {}
+    void OnICDModeChange() override {}
+};
+
+static MoistureMeasurementObserver sMoistureObserver;
 
 extern "C" void app_main()
 {
@@ -250,11 +264,12 @@ extern "C" void app_main()
     /* Perform initial moisture measurement */
     ESP_LOGI(TAG, "Performing initial moisture measurement...");
     float initial_moisture = app_driver_get_moisture_percentage();
-    uint16_t initial_value = (uint16_t)(initial_moisture * 100);
+    uint16_t initial_rounded = (uint16_t)(initial_moisture + 0.5f);
+    uint16_t initial_value = initial_rounded * 100;
     esp_matter_attr_val_t initial_val = esp_matter_nullable_uint16(initial_value);
     attribute::update(moisture_endpoint_id, RelativeHumidityMeasurement::Id,
                      RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, &initial_val);
-    ESP_LOGI(TAG, "Initial moisture: %.1f%% (raw value: %d)", initial_moisture, initial_value);
+    ESP_LOGI(TAG, "Initial moisture: %d%%", initial_rounded);
     
     /* Perform initial battery measurement */
     ESP_LOGI(TAG, "Performing initial battery measurement...");
@@ -272,16 +287,11 @@ extern "C" void app_main()
     
     ESP_LOGI(TAG, "Initial battery: %.2fV (%.0f%%)", initial_battery_voltage, initial_battery_percent);
     
-    /* Create periodic timer for moisture and battery measurements */
-    const esp_timer_create_args_t timer_args = {
-        .callback = &measurement_timer_callback,
-        .name = "measurement_timer"
-    };
-    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &measurement_timer));
-    
-    /* Start timer with configured interval */
-    ESP_ERROR_CHECK(esp_timer_start_periodic(measurement_timer, CONFIG_MOISTURE_MEASUREMENT_INTERVAL_SEC * 1000000ULL));
-    
-    ESP_LOGI(TAG, "Measurement timer started (interval: %d seconds)", CONFIG_MOISTURE_MEASUREMENT_INTERVAL_SEC);
-    ESP_LOGI(TAG, "Power optimization: Sensor powered only during measurements");
+    /* Register ICD observer to synchronize measurements with Matter wake-up cycles.
+     * Measurement interval is now controlled by CONFIG_ICD_IDLE_MODE_INTERVAL_SEC.
+     * This eliminates the separate esp_timer wake-up that caused extra current spikes. */
+    chip::Server::GetInstance().GetICDManager().RegisterObserver(&sMoistureObserver);
+    ESP_LOGI(TAG, "ICD measurement observer registered (interval: %d s via ICD_IDLE_MODE_INTERVAL)",
+             CONFIG_ICD_IDLE_MODE_INTERVAL_SEC);
+    ESP_LOGI(TAG, "Power optimization: Sensor measurement synced with ICD active mode");
 }
