@@ -25,6 +25,9 @@
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
 #include <app/icd/server/ICDStateObserver.h>
+#include <app/icd/server/ICDNotifier.h>
+#include <esp_timer.h>
+#include <inttypes.h>
 
 static const char *TAG = "app_main";
 
@@ -131,6 +134,21 @@ static esp_err_t app_attribute_update_cb(attribute::callback_type_t type, uint16
  * Perform moisture and battery measurement.
  * Called from ScheduleWork on the CHIP task when ICD enters active mode.
  */
+/* Fallback timer: if ICD never triggers an active-mode transition (device stays active),
+ * this single-shot timer will ensure measurements still occur at the configured interval.
+ * The timer is restarted from `perform_measurement()` after any measurement runs. */
+static esp_timer_handle_t s_fallback_timer = nullptr;
+
+/* Forward declaration so fallback callback can schedule the work. */
+static void perform_measurement(intptr_t);
+static void fallback_timer_cb(void *);
+
+static void fallback_timer_cb(void *)
+{
+    ESP_LOGW(TAG, "Fallback timer fired — scheduling measurement");
+    chip::DeviceLayer::PlatformMgr().ScheduleWork(perform_measurement);
+}
+
 static void perform_measurement(intptr_t)
 {
     ESP_LOGI(TAG, "=== ICD-synced measurement starting ===");
@@ -169,6 +187,14 @@ static void perform_measurement(intptr_t)
     
     ESP_LOGI(TAG, "Battery: %.2fV (%.0f%%), BatPercentRemaining=%d, BatVoltage=%u mV", 
              battery_voltage, battery_percent, bat_percent_remaining, bat_voltage_mv);
+
+    /* restart fallback timer (single-shot) so fallback only fires when ICD doesn't trigger) */
+    if (s_fallback_timer) {
+        esp_timer_stop(s_fallback_timer);
+        uint64_t usec = (uint64_t)CONFIG_ICD_IDLE_MODE_INTERVAL_SEC * 1000000ULL;
+        esp_timer_start_once(s_fallback_timer, usec);
+        ESP_LOGD(TAG, "Fallback timer restarted for %llu us", (unsigned long long)usec);
+    }
 }
 
 /**
@@ -192,6 +218,30 @@ public:
 };
 
 static MoistureMeasurementObserver sMoistureObserver;
+
+/* Lightweight ICDListener implementation for debug visibility. */
+class DebugICDListener : public chip::app::ICDListener
+{
+public:
+#include <inttypes.h>
+#if 0
+    /* placeholder to keep formatting consistent */
+#endif
+    void OnNetworkActivity() override { ESP_LOGI(TAG, "ICDNotifier: NetworkActivity"); }
+    void OnKeepActiveRequest(chip::app::ICDListener::KeepActiveFlags request) override { ESP_LOGI(TAG, "ICDNotifier: KeepActiveRequest flags=0x%02x", (unsigned)request.Raw()); }
+#if CHIP_CONFIG_ENABLE_ICD_DSLS
+    void OnSITModeRequest() override { ESP_LOGI(TAG, "ICDNotifier: SITModeRequest"); }
+    void OnSITModeRequestWithdrawal() override { ESP_LOGI(TAG, "ICDNotifier: SITModeRequestWithdrawal"); }
+#endif
+    void OnActiveRequestWithdrawal(chip::app::ICDListener::KeepActiveFlags request) override { ESP_LOGI(TAG, "ICDNotifier: ActiveRequestWithdrawal flags=0x%02x", (unsigned)request.Raw()); }
+    void OnICDManagementServerEvent(chip::app::ICDListener::ICDManagementEvents event) override { ESP_LOGI(TAG, "ICDNotifier: ICDManagementEvent=%u", static_cast<unsigned>(event)); }
+    void OnSubscriptionReport() override { ESP_LOGI(TAG, "ICDNotifier: SubscriptionReport"); }
+#if CHIP_CONFIG_ENABLE_ICD_SERVER && CHIP_CONFIG_ENABLE_ICD_CIP && CHIP_CONFIG_ENABLE_ICD_CHECK_IN_ON_REPORT_TIMEOUT
+    void OnSendCheckIn(const chip::Access::SubjectDescriptor & subject) override { ESP_LOGI(TAG, "ICDNotifier: SendCheckIn"); }
+#endif
+};
+
+static DebugICDListener sICDDebugListener;
 
 extern "C" void app_main()
 {
@@ -293,5 +343,35 @@ extern "C" void app_main()
     chip::Server::GetInstance().GetICDManager().RegisterObserver(&sMoistureObserver);
     ESP_LOGI(TAG, "ICD measurement observer registered (interval: %d s via ICD_IDLE_MODE_INTERVAL)",
              CONFIG_ICD_IDLE_MODE_INTERVAL_SEC);
+
+    /* Also subscribe a debug ICDListener for extra visibility/debugging */
+    /* Subscribe from the CHIP task context to satisfy thread-safety requirements. */
+    auto subscribe_icd_debug = [](intptr_t) {
+        CHIP_ERROR res = chip::app::ICDNotifier::GetInstance().Subscribe(&sICDDebugListener);
+        if (res == CHIP_NO_ERROR) {
+            ESP_LOGI(TAG, "Subscribed debug ICDListener to ICDNotifier (chip task)");
+        } else {
+            ESP_LOGW(TAG, "Failed to subscribe debug ICDListener to ICDNotifier: %d", res);
+        }
+    };
+    chip::DeviceLayer::PlatformMgr().ScheduleWork(subscribe_icd_debug);
     ESP_LOGI(TAG, "Power optimization: Sensor measurement synced with ICD active mode");
+
+    /* Create and start the fallback single-shot timer. It will be restarted from
+     * `perform_measurement()` after any successful measurement (ICD or fallback).
+     */
+    if (!s_fallback_timer) {
+        const esp_timer_create_args_t t_args = {
+            .callback = &fallback_timer_cb,
+            .arg = nullptr,
+            .name = "moisture_fallback"
+        };
+        if (esp_timer_create(&t_args, &s_fallback_timer) == ESP_OK) {
+            uint64_t usec = (uint64_t)CONFIG_ICD_IDLE_MODE_INTERVAL_SEC * 1000000ULL;
+            esp_timer_start_once(s_fallback_timer, usec);
+            ESP_LOGI(TAG, "Fallback timer started for %d s", CONFIG_ICD_IDLE_MODE_INTERVAL_SEC);
+        } else {
+            ESP_LOGW(TAG, "Failed to create fallback timer");
+        }
+    }
 }
