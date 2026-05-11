@@ -13,6 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#include <nvs.h>
 #include <app_priv.h>
 
 using namespace chip::app::Clusters;
@@ -21,18 +22,31 @@ using namespace esp_matter;
 static constexpr char *TAG = "app_driver";
 
 
-#define MOISTURE_DRY_VALUE      2750  // ADC value for dry soil (in mV) - CALIBRATE: measure in dry air
-#define MOISTURE_WET_VALUE      1250   // ADC value for wet soil (in mV) - CALIBRATE: measure in water
+#define MOISTURE_DRY_VALUE      2690  // ADC value for dry soil (in mV) - CALIBRATE: measure in dry air
+#define MOISTURE_WET_VALUE      1170   // ADC value for wet soil (in mV) - CALIBRATE: measure in water
 #define SENSOR_WARMUP_MS        300   // Time for sensor to stabilize after power-on
 
 /* Battery measurement configuration */
 #define BATTERY_ADC_CHANNEL     ADC_CHANNEL_0  // GPIO1
 #define VOLTAGE_DIVIDER_RATIO   1.4256f           // 4.7M oben, 2M unten: (4.7M + 2M)/2M
-#define BATTERY_FULL_VOLTAGE    4.2f              // Fully charged battery voltage
+#define BATTERY_FULL_VOLTAGE    4.15f              // Fully charged battery voltage
 #define BATTERY_EMPTY_VOLTAGE   3.0f              // Empty battery voltage
 
+/* NVS calibration storage */
+#define CAL_NVS_NAMESPACE       "moisture_cal"
+#define CAL_NVS_KEY_DRY         "dry_mv"
+#define CAL_NVS_KEY_WET         "wet_mv"
+
+/* Calibration window */
+#define CALIBRATION_DURATION_MS  30000
+#define CALIBRATION_SAMPLE_MS      500
+
+/* Runtime calibration values (overridden by NVS if available) */
+static int s_dry_value = MOISTURE_DRY_VALUE;
+static int s_wet_value = MOISTURE_WET_VALUE;
 
 static bool measurement_in_progress = false;
+static bool s_calibration_running   = false;
 app_driver_handle_t app_driver_moisture_sensor_init()
 {
     /* Configure GPIO for sensor power control with MAXIMUM drive strength */
@@ -50,10 +64,31 @@ app_driver_handle_t app_driver_moisture_sensor_init()
     /* Start with sensor powered OFF */
     gpio_set_level((gpio_num_t)CONFIG_MOISTURE_SENSOR_POWER_GPIO, 0);
     
-    ESP_LOGI(TAG, "Moisture sensor initialized - GPIO%d (ADC_CH%d)", 
+    /* Load calibration from NVS (falls back to compile-time defaults if not set) */
+    nvs_handle_t cal_nvs;
+    if (nvs_open(CAL_NVS_NAMESPACE, NVS_READONLY, &cal_nvs) == ESP_OK) {
+        int32_t val;
+        if (nvs_get_i32(cal_nvs, CAL_NVS_KEY_DRY, &val) == ESP_OK) s_dry_value = (int)val;
+        if (nvs_get_i32(cal_nvs, CAL_NVS_KEY_WET, &val) == ESP_OK) s_wet_value = (int)val;
+        nvs_close(cal_nvs);
+    }
+    ESP_LOGI(TAG, "Calibration values: dry=%d mV, wet=%d mV", s_dry_value, s_wet_value);
+
+    /* Configure LED GPIO for calibration feedback */
+    gpio_config_t led_conf = {};
+    led_conf.intr_type    = GPIO_INTR_DISABLE;
+    led_conf.mode         = GPIO_MODE_OUTPUT;
+    led_conf.pin_bit_mask = (1ULL << CONFIG_CALIBRATION_LED_GPIO);
+    led_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    led_conf.pull_up_en   = GPIO_PULLUP_DISABLE;
+    gpio_config(&led_conf);
+    gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, 0);
+
+    ESP_LOGI(TAG, "Moisture sensor initialized - GPIO%d (ADC_CH%d)",
              CONFIG_MOISTURE_SENSOR_GPIO, CONFIG_MOISTURE_SENSOR_ADC_CHANNEL);
-    ESP_LOGI(TAG, "Sensor power control: GPIO%d (starts LOW/OFF, drive=40mA)", 
+    ESP_LOGI(TAG, "Sensor power control: GPIO%d (starts LOW/OFF, drive=40mA)",
              CONFIG_MOISTURE_SENSOR_POWER_GPIO);
+    ESP_LOGI(TAG, "Calibration LED: GPIO%d", CONFIG_CALIBRATION_LED_GPIO);
     return (app_driver_handle_t)1;
 }
 
@@ -161,7 +196,7 @@ float app_driver_get_moisture_percentage()
     /* Convert voltage to moisture percentage (0-100%)
      * Higher voltage = drier soil, lower voltage = wetter soil
      */
-    moisture = 100.0f - ((float)(voltage - MOISTURE_WET_VALUE) / (MOISTURE_DRY_VALUE - MOISTURE_WET_VALUE) * 100.0f);
+    moisture = 100.0f - ((float)(voltage - s_wet_value) / (float)(s_dry_value - s_wet_value) * 100.0f);
     
     /* Clamp to 0-100% range */
     if (moisture < 0) moisture = 0;
@@ -303,4 +338,157 @@ float app_driver_battery_voltage_to_percent(float voltage)
     if (percent > 100) percent = 100;
     
     return percent;
+}
+/* ---- Calibration ---- */
+
+static void calibration_task(void *arg)
+{
+    /* Wait for any ongoing normal measurement to finish */
+    while (measurement_in_progress) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    measurement_in_progress = true;
+
+    ESP_LOGI(TAG, "=== Calibration started: move sensor between DRY and WET for %d s ===",
+             CALIBRATION_DURATION_MS / 1000);
+
+    adc_oneshot_unit_handle_t adc1_handle = NULL;
+    adc_cali_handle_t adc1_cali_handle = NULL;
+
+    adc_oneshot_unit_init_cfg_t init_config = { .unit_id = ADC_UNIT_1 };
+    if (adc_oneshot_new_unit(&init_config, &adc1_handle) != ESP_OK) {
+        ESP_LOGE(TAG, "Calibration: ADC init failed");
+        measurement_in_progress = false;
+        s_calibration_running   = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    adc_oneshot_chan_cfg_t config = {
+        .atten    = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    adc_oneshot_config_channel(adc1_handle, (adc_channel_t)CONFIG_MOISTURE_SENSOR_ADC_CHANNEL, &config);
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t cali_config = {
+        .unit_id  = ADC_UNIT_1,
+        .atten    = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    adc_cali_create_scheme_curve_fitting(&cali_config, &adc1_cali_handle);
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    adc_cali_line_fitting_config_t cali_config = {
+        .unit_id  = ADC_UNIT_1,
+        .atten    = ADC_ATTEN_DB_12,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    adc_cali_create_scheme_line_fitting(&cali_config, &adc1_cali_handle);
+#endif
+
+    /* Power sensor on */
+    gpio_hold_dis((gpio_num_t)CONFIG_MOISTURE_SENSOR_POWER_GPIO);
+    gpio_set_level((gpio_num_t)CONFIG_MOISTURE_SENSOR_POWER_GPIO, 1);
+    gpio_hold_en((gpio_num_t)CONFIG_MOISTURE_SENSOR_POWER_GPIO);
+    vTaskDelay(pdMS_TO_TICKS(SENSOR_WARMUP_MS));
+
+    const int num_samples = CALIBRATION_DURATION_MS / CALIBRATION_SAMPLE_MS;
+    int max_mv = 0;
+    int min_mv = 9999;
+
+    for (int i = 0; i < num_samples; i++) {
+        /* Blink LED at 1 Hz (toggles every CALIBRATION_SAMPLE_MS = 500 ms).
+         * gpio_hold_en keeps the level stable during light sleep. */
+        gpio_hold_dis((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+        gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, i % 2);
+        gpio_hold_en((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+
+        int raw = 0;
+        adc_oneshot_read(adc1_handle, (adc_channel_t)CONFIG_MOISTURE_SENSOR_ADC_CHANNEL, &raw);
+
+        int mv = 0;
+        if (adc1_cali_handle) {
+            adc_cali_raw_to_voltage(adc1_cali_handle, raw, &mv);
+        } else {
+            mv = raw * 3300 / 4095;
+        }
+
+        if (mv > max_mv) max_mv = mv;
+        if (mv < min_mv) min_mv = mv;
+
+        ESP_LOGI(TAG, "Cal [%2d/%d] %d mV  (min=%d, max=%d)",
+                 i + 1, num_samples, mv, min_mv, max_mv);
+        vTaskDelay(pdMS_TO_TICKS(CALIBRATION_SAMPLE_MS));
+    }
+
+    /* Ensure LED is OFF after loop (last iteration may have left it ON) */
+    gpio_hold_dis((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+    gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, 0);
+
+    /* Power sensor off */
+    gpio_hold_dis((gpio_num_t)CONFIG_MOISTURE_SENSOR_POWER_GPIO);
+    gpio_set_level((gpio_num_t)CONFIG_MOISTURE_SENSOR_POWER_GPIO, 0);
+
+    /* Cleanup ADC */
+    if (adc1_cali_handle) {
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+        adc_cali_delete_scheme_curve_fitting(adc1_cali_handle);
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+        adc_cali_delete_scheme_line_fitting(adc1_cali_handle);
+#endif
+    }
+    adc_oneshot_del_unit(adc1_handle);
+    measurement_in_progress = false;
+
+    /* Validate: require at least 1000 mV spread */
+    if ((max_mv - min_mv) < 1000) {
+        ESP_LOGW(TAG, "Calibration discarded: spread only %d mV (need >=1000 mV). "
+                      "Move sensor between dry air and water during the window.",
+                 max_mv - min_mv);
+        /* 3 rapid blinks = error */
+        for (int i = 0; i < 6; i++) {
+            gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, i % 2);
+            vTaskDelay(pdMS_TO_TICKS(150));
+        }
+        gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, 0);
+        s_calibration_running = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    /* Apply to RAM */
+    s_dry_value = max_mv;
+    s_wet_value = min_mv;
+
+    /* Persist to NVS */
+    nvs_handle_t cal_nvs;
+    if (nvs_open(CAL_NVS_NAMESPACE, NVS_READWRITE, &cal_nvs) == ESP_OK) {
+        nvs_set_i32(cal_nvs, CAL_NVS_KEY_DRY, (int32_t)s_dry_value);
+        nvs_set_i32(cal_nvs, CAL_NVS_KEY_WET, (int32_t)s_wet_value);
+        nvs_commit(cal_nvs);
+        nvs_close(cal_nvs);
+    }
+    ESP_LOGI(TAG, "=== Calibration saved: dry=%d mV, wet=%d mV ===", s_dry_value, s_wet_value);
+
+    /* LED solid 3 s = success (start from OFF so the ON transition is clearly visible) */
+    vTaskDelay(pdMS_TO_TICKS(300));
+    gpio_hold_dis((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+    gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, 1);
+    gpio_hold_en((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    gpio_hold_dis((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+    gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, 0);
+
+    s_calibration_running = false;
+    vTaskDelete(NULL);
+}
+
+void app_driver_calibration_start(void)
+{
+    if (s_calibration_running) {
+        ESP_LOGW(TAG, "Calibration already running");
+        return;
+    }
+    s_calibration_running = true;
+    xTaskCreate(calibration_task, "cal_task", 4096, NULL, 5, NULL);
 }

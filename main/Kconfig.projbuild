@@ -40,4 +40,24 @@ menu "Example Configuration"
             Longer intervals save more battery power.
             Recommended: 600s (10 min) for battery-powered sensors.
 
+    config FACTORY_RESET_BUTTON_GPIO
+        int "BOOT Button GPIO Pin"
+        default 9
+        help
+            GPIO number of the BOOT button.
+            Single click: triggers an immediate moisture measurement.
+            Triple click: starts 30 s calibration window.
+            Long press (5 s): performs a factory reset.
+            Also serves as a light-sleep wake-up source.
+            ESP32-H2 / C6 / C5: GPIO9
+
+    config CALIBRATION_LED_GPIO
+        int "Calibration Status LED GPIO"
+        default 11
+        help
+            GPIO connected to an LED for calibration status feedback.
+            During 30 s calibration: LED blinks at 1 Hz.
+            Success: LED solid for 3 s.
+            Error (range too small): LED fast-blinks 3 times.
+
 endmenu

@@ -22,6 +22,9 @@
 #include <platform/ESP32/OpenthreadLauncher.h>
 #endif
 
+#include "iot_button.h"
+#include "button_gpio.h"
+
 #include <app/server/CommissioningWindowManager.h>
 #include <app/server/Server.h>
 #include <app/icd/server/ICDStateObserver.h>
@@ -147,6 +150,57 @@ static void fallback_timer_cb(void *)
 {
     ESP_LOGW(TAG, "Fallback timer fired — scheduling measurement");
     chip::DeviceLayer::PlatformMgr().ScheduleWork(perform_measurement);
+}
+
+/* ---- BOOT button callbacks ---- */
+
+static void button_single_click_cb(void *button_handle, void *usr_data)
+{
+    ESP_LOGI(TAG, "BOOT button: single click — triggering measurement");
+    chip::DeviceLayer::PlatformMgr().ScheduleWork(perform_measurement);
+}
+
+static void button_factory_reset_cb(void *button_handle, void *usr_data)
+{
+    ESP_LOGW(TAG, "BOOT button: long press — initiating factory reset");
+    chip::Server::GetInstance().ScheduleFactoryReset();
+}
+
+static void button_calibrate_cb(void *button_handle, void *usr_data)
+{
+    ESP_LOGI(TAG, "BOOT button: triple click — starting calibration");
+    app_driver_calibration_start();
+}
+
+static void app_button_init(void)
+{
+    const button_config_t btn_cfg = {
+        .long_press_time  = 5000,   /* 5 s hold → factory reset */
+        .short_press_time = 0,      /* use library default */
+    };
+    const button_gpio_config_t gpio_cfg = {
+        .gpio_num          = CONFIG_FACTORY_RESET_BUTTON_GPIO,
+        .active_level      = 0,     /* BOOT button pulls GPIO low */
+        .enable_power_save = true,  /* configure as light-sleep wake-up source */
+        .disable_pull      = false, /* keep internal pull-up active */
+    };
+
+    button_handle_t btn = NULL;
+    esp_err_t ret = iot_button_new_gpio_device(&btn_cfg, &gpio_cfg, &btn);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create BOOT button: %d", ret);
+        return;
+    }
+
+    iot_button_register_cb(btn, BUTTON_SINGLE_CLICK, NULL, button_single_click_cb, NULL);
+    iot_button_register_cb(btn, BUTTON_LONG_PRESS_START, NULL, button_factory_reset_cb, NULL);
+
+    button_event_args_t triple_args = { .multiple_clicks = { .clicks = 3 } };
+    iot_button_register_cb(btn, BUTTON_MULTIPLE_CLICK, &triple_args, button_calibrate_cb, NULL);
+
+    ESP_LOGI(TAG, "BOOT button initialised on GPIO%d "
+             "(1×=measure, 3×=calibrate 30s, 5s=factory-reset, wake-source)",
+             CONFIG_FACTORY_RESET_BUTTON_GPIO);
 }
 
 static void perform_measurement(intptr_t)
@@ -374,4 +428,7 @@ extern "C" void app_main()
             ESP_LOGW(TAG, "Failed to create fallback timer");
         }
     }
+
+    /* Initialise BOOT button (measurement trigger + factory reset) */
+    app_button_init();
 }

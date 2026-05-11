@@ -17,6 +17,7 @@ app_driver_handle_t app_driver_moisture_sensor_init();
 float app_driver_get_moisture_percentage();
 float app_driver_get_battery_voltage();
 float app_driver_battery_voltage_to_percent(float voltage);
+void app_driver_calibration_start(void);
 
 #if CHIP_DEVICE_CONFIG_ENABLE_THREAD
 #include "esp_openthread_types.h"
