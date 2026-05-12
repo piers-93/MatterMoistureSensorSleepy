@@ -30,6 +30,7 @@
 #include <app/icd/server/ICDStateObserver.h>
 #include <app/icd/server/ICDNotifier.h>
 #include <esp_timer.h>
+#include <esp_sleep.h>
 #include <inttypes.h>
 
 static const char *TAG = "app_main";
@@ -43,6 +44,40 @@ using namespace chip::app::Clusters;
 static uint16_t moisture_endpoint_id = 0;
 
 constexpr auto k_timeout_seconds = 300;
+
+/* ---- Commissioning LED blink ---- */
+static TaskHandle_t s_commissioning_blink_task = nullptr;
+
+static void commissioning_blink_task(void *)
+{
+    bool level = false;
+    while (true) {
+        level = !level;
+        gpio_hold_dis((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+        gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, level ? 1 : 0);
+        gpio_hold_en((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+        vTaskDelay(pdMS_TO_TICKS(150)); /* 150 ms on/off = ~3 Hz fast blink */
+    }
+}
+
+static void commissioning_led_start()
+{
+    if (s_commissioning_blink_task == nullptr) {
+        xTaskCreate(commissioning_blink_task, "comm_blink", 1024, nullptr, 4, &s_commissioning_blink_task);
+        ESP_LOGI(TAG, "Commissioning LED blink started");
+    }
+}
+
+static void commissioning_led_stop()
+{
+    if (s_commissioning_blink_task != nullptr) {
+        vTaskDelete(s_commissioning_blink_task);
+        s_commissioning_blink_task = nullptr;
+        gpio_hold_dis((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+        gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, 0);
+        ESP_LOGI(TAG, "Commissioning LED blink stopped");
+    }
+}
 
 static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 {
@@ -69,10 +104,12 @@ static void app_event_cb(const ChipDeviceEvent *event, intptr_t arg)
 
     case chip::DeviceLayer::DeviceEventType::kCommissioningWindowOpened:
         ESP_LOGI(TAG, "Commissioning window opened");
+        commissioning_led_start();
         break;
 
     case chip::DeviceLayer::DeviceEventType::kCommissioningWindowClosed:
         ESP_LOGI(TAG, "Commissioning window closed");
+        commissioning_led_stop();
         break;
 
     case chip::DeviceLayer::DeviceEventType::kFabricRemoved:
@@ -154,9 +191,21 @@ static void fallback_timer_cb(void *)
 
 /* ---- BOOT button callbacks ---- */
 
+static void led_brief_flash_task(void *)
+{
+    gpio_hold_dis((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+    gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, 1);
+    gpio_hold_en((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    gpio_hold_dis((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO);
+    gpio_set_level((gpio_num_t)CONFIG_CALIBRATION_LED_GPIO, 0);
+    vTaskDelete(NULL);
+}
+
 static void button_single_click_cb(void *button_handle, void *usr_data)
 {
-    ESP_LOGI(TAG, "BOOT button: single click — triggering measurement");
+    ESP_LOGI(TAG, "BOOT button: woke from light sleep — triggering measurement");
+    xTaskCreate(led_brief_flash_task, "led_flash", 1024, NULL, 5, NULL);
     chip::DeviceLayer::PlatformMgr().ScheduleWork(perform_measurement);
 }
 
@@ -197,6 +246,16 @@ static void app_button_init(void)
 
     button_event_args_t triple_args = { .multiple_clicks = { .clicks = 3 } };
     iot_button_register_cb(btn, BUTTON_MULTIPLE_CLICK, &triple_args, button_calibrate_cb, NULL);
+
+    /* Callback fired when the button library stops its polling timer and re-arms
+     * the GPIO wake-up interrupt — the closest visible signal to "entering light sleep". */
+    const button_power_save_config_t ps_cfg = {
+        .enter_power_save_cb = [](void *) {
+            ESP_LOGI("app_main", "Button idle — entering light sleep");
+        },
+        .usr_data = nullptr,
+    };
+    iot_button_register_power_save_cb(&ps_cfg);
 
     ESP_LOGI(TAG, "BOOT button initialised on GPIO%d "
              "(1×=measure, 3×=calibrate 30s, 5s=factory-reset, wake-source)",
@@ -300,6 +359,15 @@ static DebugICDListener sICDDebugListener;
 extern "C" void app_main()
 {
     esp_err_t err = ESP_OK;
+
+    /* Log wakeup cause so we can confirm light sleep is working */
+    esp_sleep_wakeup_cause_t wakeup = esp_sleep_get_wakeup_cause();
+    switch (wakeup) {
+        case ESP_SLEEP_WAKEUP_GPIO:   ESP_LOGI(TAG, "=== Woke from light sleep: GPIO (BOOT button) ==="); break;
+        case ESP_SLEEP_WAKEUP_TIMER:  ESP_LOGI(TAG, "=== Woke from light sleep: Timer ==="); break;
+        case ESP_SLEEP_WAKEUP_UNDEFINED: /* fall-through: normal power-on/reset */ break;
+        default: ESP_LOGI(TAG, "=== Woke from light sleep: cause=%d ===", (int)wakeup); break;
+    }
 
     /* Initialize the ESP NVS layer */
     nvs_flash_init();
