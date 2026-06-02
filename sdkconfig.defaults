@@ -90,3 +90,8 @@ CONFIG_ICD_ACTIVE_MODE_THRESHOLD_MS=1000
 
 # Enable power save for the button
 CONFIG_GPIO_BUTTON_SUPPORT_POWER_SAVE=y
+
+# Matter SoftwareVersion (number). Der String wird via Compile-Define aus
+# PROJECT_VER in CMakeLists.txt gesetzt; beide kommen aus der app.bin und
+# brauchen kein Neugenerieren der Factory-Partition / kein Re-Pairing.
+CONFIG_DEVICE_SOFTWARE_VERSION_NUMBER=1
