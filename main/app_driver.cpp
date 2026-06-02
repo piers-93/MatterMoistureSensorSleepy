@@ -10,6 +10,7 @@
 #include <esp_adc/adc_oneshot.h>
 #include <esp_adc/adc_cali.h>
 #include <esp_adc/adc_cali_scheme.h>
+#include <driver/temperature_sensor.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -157,13 +158,21 @@ float app_driver_get_moisture_percentage()
     /* THIRD: Read ADC - do 5 dummy reads to settle, then take real reading */
     ESP_LOGI(TAG, "Step 3: Reading ADC Channel %d...", CONFIG_MOISTURE_SENSOR_ADC_CHANNEL);
     
+
     int dummy;
     for (int i = 0; i < 5; i++) {
         adc_oneshot_read(adc1_handle, (adc_channel_t)CONFIG_MOISTURE_SENSOR_ADC_CHANNEL, &dummy);
     }
     
-    adc_oneshot_read(adc1_handle, (adc_channel_t)CONFIG_MOISTURE_SENSOR_ADC_CHANNEL, &adc_raw);
-    
+    adc_raw = 0;
+    for (int i = 0; i < 15; i++) {
+        int reading;
+        adc_oneshot_read(adc1_handle, (adc_channel_t)CONFIG_MOISTURE_SENSOR_ADC_CHANNEL, &reading);
+        adc_raw += reading;
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+    adc_raw /= 15;
+
     ESP_LOGI(TAG, "ADC raw value: %d", adc_raw);
     
     /* Setup ADC calibration */
@@ -491,4 +500,30 @@ void app_driver_calibration_start(void)
     }
     s_calibration_running = true;
     xTaskCreate(calibration_task, "cal_task", 4096, NULL, 5, NULL);
+}
+
+float app_driver_get_temperature()
+{
+    temperature_sensor_handle_t tsens = NULL;
+    temperature_sensor_config_t tsens_config = {
+        .range_min = -10,
+        .range_max = 80,
+    };
+    float temp_celsius = 0.0f;
+
+    if (temperature_sensor_install(&tsens_config, &tsens) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to install internal temperature sensor");
+        return 0.0f;
+    }
+    if (temperature_sensor_enable(tsens) != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to enable internal temperature sensor");
+        temperature_sensor_uninstall(tsens);
+        return 0.0f;
+    }
+    temperature_sensor_get_celsius(tsens, &temp_celsius);
+    temperature_sensor_disable(tsens);
+    temperature_sensor_uninstall(tsens);
+
+    ESP_LOGI(TAG, "Internal temperature: %.1f °C", temp_celsius);
+    return temp_celsius;
 }

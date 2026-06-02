@@ -33,6 +33,11 @@
 #include <esp_sleep.h>
 #include <inttypes.h>
 
+/* esp-matter patch: directly set MeasuredValue on the new data_model_provider
+ * TemperatureMeasurementCluster server (the legacy attribute::update() path is
+ * not visible to the new cluster's ReadAttribute()). */
+extern "C" int esp_matter_temperature_measurement_set_measured_value(uint16_t endpoint_id, int16_t value);
+
 static const char *TAG = "app_main";
 
 using namespace esp_matter;
@@ -42,6 +47,7 @@ using namespace esp_matter::cluster;
 using namespace chip::app::Clusters;
 
 static uint16_t moisture_endpoint_id = 0;
+static uint16_t temperature_endpoint_id = 0;
 
 constexpr auto k_timeout_seconds = 300;
 
@@ -269,9 +275,8 @@ static void perform_measurement(intptr_t)
     /* Read moisture sensor (sensor will be powered on/off inside this function) */
     float moisture = app_driver_get_moisture_percentage();
     
-    /* Round to whole percent, then convert to Matter format (0.01% units) */
-    uint16_t rounded_percent = (uint16_t)(moisture + 0.5f);
-    uint16_t measured_value = rounded_percent * 100;
+    /* Convert to Matter format (0.01% units): 45.7% → 4570 */
+    uint16_t measured_value = (uint16_t)(moisture * 100.0f);
     
     /* Update Matter attribute */
     esp_matter_attr_val_t val = esp_matter_nullable_uint16(measured_value);
@@ -279,7 +284,7 @@ static void perform_measurement(intptr_t)
                      RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, &val);
     
     if (update_err == ESP_OK) {
-        ESP_LOGI(TAG, "Updated moisture: %d%%", rounded_percent);
+        ESP_LOGI(TAG, "Updated moisture: %.1f%% (raw=%u)", moisture, measured_value);
     } else {
         ESP_LOGE(TAG, "Failed to update moisture attribute, err: %d", update_err);
     }
@@ -290,16 +295,33 @@ static void perform_measurement(intptr_t)
     
     /* BatPercentRemaining: 0-200 (0.5% resolution, 200 = 100%) */
     uint8_t bat_percent_remaining = (uint8_t)(battery_percent * 2);
-    esp_matter_attr_val_t bat_percent_val = esp_matter_nullable_uint8(bat_percent_remaining);
-    attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, &bat_percent_val);
-    
     /* BatVoltage: in millivolts */
     uint32_t bat_voltage_mv = (uint32_t)(battery_voltage * 1000);
+
+    esp_matter_attr_val_t bat_percent_val = esp_matter_nullable_uint8(bat_percent_remaining);
+    attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, &bat_percent_val);
+
     esp_matter_attr_val_t bat_voltage_val = esp_matter_nullable_uint32(bat_voltage_mv);
     attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatVoltage::Id, &bat_voltage_val);
     
     ESP_LOGI(TAG, "Battery: %.2fV (%.0f%%), BatPercentRemaining=%d, BatVoltage=%u mV", 
              battery_voltage, battery_percent, bat_percent_remaining, bat_voltage_mv);
+
+    /* Read internal temperature and report via TemperatureMeasurement cluster */
+    float temp_celsius = app_driver_get_temperature();
+    /* Matter TemperatureMeasurement: int16_t, unit = 0.01 °C */
+    int16_t matter_temp = (int16_t)(temp_celsius * 100.0f);
+    esp_matter_attr_val_t temp_val = esp_matter_nullable_int16(matter_temp);
+    esp_err_t temp_err = attribute::update(temperature_endpoint_id, TemperatureMeasurement::Id,
+                     TemperatureMeasurement::Attributes::MeasuredValue::Id, &temp_val);
+    /* CRITICAL: also push value to the new cluster server (Ember-storage update is invisible to it) */
+    int new_cluster_rc = esp_matter_temperature_measurement_set_measured_value(temperature_endpoint_id, matter_temp);
+    if (temp_err == ESP_OK) {
+        ESP_LOGI(TAG, "Updated temperature: %.1f °C (raw=%d, new_cluster_rc=%d)",
+                 temp_celsius, matter_temp, new_cluster_rc);
+    } else {
+        ESP_LOGE(TAG, "Failed to update temperature attribute, err: %d", temp_err);
+    }
 
     /* restart fallback timer (single-shot) so fallback only fires when ICD doesn't trigger) */
     if (s_fallback_timer) {
@@ -350,7 +372,7 @@ public:
     void OnICDManagementServerEvent(chip::app::ICDListener::ICDManagementEvents event) override { ESP_LOGI(TAG, "ICDNotifier: ICDManagementEvent=%u", static_cast<unsigned>(event)); }
     void OnSubscriptionReport() override { ESP_LOGI(TAG, "ICDNotifier: SubscriptionReport"); }
 #if CHIP_CONFIG_ENABLE_ICD_SERVER && CHIP_CONFIG_ENABLE_ICD_CIP && CHIP_CONFIG_ENABLE_ICD_CHECK_IN_ON_REPORT_TIMEOUT
-    void OnSendCheckIn(const chip::Access::SubjectDescriptor & subject) override { ESP_LOGI(TAG, "ICDNotifier: SendCheckIn"); }
+    void OnSendCheckIn(chip::Optional<chip::Access::SubjectDescriptor> specificSubject) override { ESP_LOGI(TAG, "ICDNotifier: SendCheckIn"); }
 #endif
 };
 
@@ -398,22 +420,44 @@ extern "C" void app_main()
     moisture_endpoint_id = endpoint::get_id(app_endpoint);
     ESP_LOGI(TAG, "Moisture sensor endpoint created with ID: %d", moisture_endpoint_id);
 
+    /* Read temperature BEFORE endpoint creation so HA sees a valid MeasuredValue during commissioning.
+     * IMPORTANT: if the sensor read returns 0.0 (failed install/race during Matter init), we MUST NOT
+     * pass a null-equivalent value to the cluster, otherwise HA's discovery filter
+     * (allow_none_value=False on TemperatureSensor) silently skips entity creation.
+     * Always seed the cluster with a real non-null value. */
+    float initial_temp = app_driver_get_temperature();
+    int16_t seed_temp_raw = (int16_t)(initial_temp * 100.0f);
+    if (seed_temp_raw == 0) {
+        seed_temp_raw = 2000; /* 20.00 °C fallback so MeasuredValue is never null */
+        ESP_LOGW(TAG, "Initial temperature read returned 0, seeding cluster with 20.00 °C fallback");
+    }
+
+    /* Create temperature sensor endpoint (internal ESP32 temperature) */
+    temperature_sensor::config_t temp_config;
+    temp_config.temperature_measurement.measured_value     = nullable<int16_t>(seed_temp_raw);
+    temp_config.temperature_measurement.min_measured_value = nullable<int16_t>(-1000); /* -10 °C */
+    temp_config.temperature_measurement.max_measured_value = nullable<int16_t>(12500); /* 125 °C */
+    endpoint_t *temp_endpoint = temperature_sensor::create(node, &temp_config, ENDPOINT_FLAG_NONE, NULL);
+    ABORT_APP_ON_FAILURE(temp_endpoint != nullptr, ESP_LOGE(TAG, "Failed to create temperature sensor endpoint"));
+    temperature_endpoint_id = endpoint::get_id(temp_endpoint);
+    ESP_LOGI(TAG, "Temperature sensor endpoint created with ID: %d", temperature_endpoint_id);
+
     /* Add PowerSource cluster to root node (endpoint 0) for battery monitoring */
     endpoint_t *root_endpoint = endpoint::get(node, 0);
     ABORT_APP_ON_FAILURE(root_endpoint != nullptr, ESP_LOGE(TAG, "Failed to get root endpoint"));
-    
+
     cluster_t *power_source_cluster = cluster::create(root_endpoint, PowerSource::Id, CLUSTER_FLAG_SERVER);
     if (power_source_cluster) {
         // Battery attributes
         cluster::power_source::attribute::create_status(power_source_cluster, (uint8_t)PowerSource::PowerSourceStatusEnum::kActive);
         cluster::power_source::attribute::create_order(power_source_cluster, 0, 0, 255);
         cluster::power_source::attribute::create_description(power_source_cluster, "Battery", 7);
-        
-        // Battery-specific attributes (in millivolts: 3000-4200 mV for LiPo)
-        cluster::power_source::attribute::create_bat_voltage(power_source_cluster, nullable<uint32_t>(3700), nullable<uint32_t>(3000), nullable<uint32_t>(4200));
+
+        // Battery-specific attributes: LiPo nominal 3.7 V, allow up to 4.5 V to cover post-charge spikes.
+        cluster::power_source::attribute::create_bat_voltage(power_source_cluster, nullable<uint32_t>(3700), nullable<uint32_t>(3000), nullable<uint32_t>(4500));
         cluster::power_source::attribute::create_bat_percent_remaining(power_source_cluster, nullable<uint8_t>(200), nullable<uint8_t>(0), nullable<uint8_t>(200));
         cluster::power_source::attribute::create_bat_charge_level(power_source_cluster, (uint8_t)PowerSource::BatChargeLevelEnum::kOk);
-        
+
         ESP_LOGI(TAG, "Power Source cluster added to root endpoint");
     } else {
         ESP_LOGE(TAG, "Failed to create Power Source cluster");
@@ -436,12 +480,11 @@ extern "C" void app_main()
     /* Perform initial moisture measurement */
     ESP_LOGI(TAG, "Performing initial moisture measurement...");
     float initial_moisture = app_driver_get_moisture_percentage();
-    uint16_t initial_rounded = (uint16_t)(initial_moisture + 0.5f);
-    uint16_t initial_value = initial_rounded * 100;
-    esp_matter_attr_val_t initial_val = esp_matter_nullable_uint16(initial_value);
+    uint16_t initial_moisture_value = (uint16_t)(initial_moisture * 100.0f);
+    esp_matter_attr_val_t initial_val = esp_matter_nullable_uint16(initial_moisture_value);
     attribute::update(moisture_endpoint_id, RelativeHumidityMeasurement::Id,
                      RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, &initial_val);
-    ESP_LOGI(TAG, "Initial moisture: %d%%", initial_rounded);
+    ESP_LOGI(TAG, "Initial moisture: %.1f%%", initial_moisture);
     
     /* Perform initial battery measurement */
     ESP_LOGI(TAG, "Performing initial battery measurement...");
@@ -450,14 +493,31 @@ extern "C" void app_main()
     
     uint8_t initial_bat_percent = (uint8_t)(initial_battery_percent * 2);
     uint32_t initial_bat_voltage = (uint32_t)(initial_battery_voltage * 1000);
-    
+
     esp_matter_attr_val_t bat_percent_val = esp_matter_nullable_uint8(initial_bat_percent);
     attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatPercentRemaining::Id, &bat_percent_val);
-    
+
     esp_matter_attr_val_t bat_voltage_val = esp_matter_nullable_uint32(initial_bat_voltage);
     attribute::update(0, PowerSource::Id, PowerSource::Attributes::BatVoltage::Id, &bat_voltage_val);
     
     ESP_LOGI(TAG, "Initial battery: %.2fV (%.0f%%)", initial_battery_voltage, initial_battery_percent);
+
+    /* Update temperature attribute (already measured before endpoint creation).
+     * Schedule on the CHIP task so the update runs in the correct context after Matter is fully up.
+     * We MUST call the new cluster setter; attribute::update() into Ember is invisible to the
+     * new TemperatureMeasurementCluster server that HA actually reads from. */
+    int16_t initial_matter_temp = seed_temp_raw; /* same value we seeded into config */
+    chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg) {
+        int16_t v = (int16_t)arg;
+        esp_matter_attr_val_t tv = esp_matter_nullable_int16(v);
+        esp_err_t e = attribute::update(temperature_endpoint_id, TemperatureMeasurement::Id,
+                         TemperatureMeasurement::Attributes::MeasuredValue::Id, &tv);
+        int rc = esp_matter_temperature_measurement_set_measured_value(temperature_endpoint_id, v);
+        ESP_LOGI(TAG, "[CHIP task] Initial temperature update: endpoint=%u raw=%d err=%d new_cluster_rc=%d",
+                 temperature_endpoint_id, v, e, rc);
+    }, (intptr_t)initial_matter_temp);
+    ESP_LOGI(TAG, "Initial temperature: %.1f °C (seed raw=%d, endpoint_id=%u)",
+             initial_temp, initial_matter_temp, temperature_endpoint_id);
     
     /* Register ICD observer to synchronize measurements with Matter wake-up cycles.
      * Measurement interval is now controlled by CONFIG_ICD_IDLE_MODE_INTERVAL_SEC.
