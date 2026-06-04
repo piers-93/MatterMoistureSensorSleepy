@@ -31,7 +31,7 @@ Usage: $0 [--dry-run] [-- <extra esp-matter-mfg-tool args>]
 
 Environment variables override defaults: VID, PID, VENDOR_NAME, PRODUCT_NAME,
 HW_VER, HW_VER_STR, MATTER_SDK_PATH, PAI_KEY, PAI_CERT, CD, PORT, TARGET,
-EFUSE_KEY_ID, FLASH_ADDR (default 0x10000), BAUD (default 460800)
+EFUSE_KEY_ID, FLASH_ADDR (default 0x3E0000), BAUD (default 460800)
 
 Example:
   VID=0xFFF2 PRODUCT_NAME="My Lamp" $0 --dry-run

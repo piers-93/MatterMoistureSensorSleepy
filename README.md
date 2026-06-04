@@ -84,6 +84,63 @@ usbipd bind --busid <busid>
 
 -gesamt etwa 30uA im Light Sleep, gemessen in der Akkuzuleitung.
 
+## Matter-OTA-Auto-Sync auf Home Assistant einrichten
+Voraussetzungen:
+HA mit Advanced SSH & Web Terminal-Add-on (Protection Mode = OFF),
+Matter-Server-Add-on läuft (Container: addon_core_matter_server),
+icd_app.ota und icd_app.json als Assets eines GitHub-Releases hochgeladen (öffentliches Repo)  
+
+**1. Sync-Skript anlegen**  
+
+Im SSH-Add-on-Terminal:
+
+```bash
+nano /config/sync_matter_ota.sh
+```
+Inhalt einfügen (scripts/ha/sync_matter_ota.sh).
+Speichern (Strg+X, y), ausführbar machen:
+```bash
+chmod +x /config/sync_matter_ota.sh
+```
+**2. Einmal manuell testen**
+```bash
+bash /config/sync_matter_ota.sh once
+cat /config/matter_ota.log
+```
+Erwartet: change detected ... copied ... addon ready. Gegencheck:
+
+```bash
+docker exec addon_core_matter_server cat /config/ota/icd_app.json
+```
+
+**3. Daemon-Starter anlegen**
+```bash
+nano /config/start_matter_sync.sh
+```
+
+```sh
+#!/bin/sh
+pkill -f sync_matter_ota.sh
+nohup /config/sync_matter_ota.sh daemon >/dev/null 2>&1 &
+```
+
+```bash
+chmod +x /config/start_matter_sync.sh
+```
+
+**4. Beim Add-on-Start automatisch starten**
+HA → Einstellungen → Add-ons → Advanced SSH & Web Terminal → Configuration → bei init_commands einen Eintrag hinzufügen:
+```bash
+/config/start_matter_sync.sh
+```
+Speichern → Add-on Restart.
+
+**5. Prüfen**
+```bash
+ps aux | grep sync_matter_ota   # eine Zeile mit "daemon"
+tail -f /config/matter_ota.log  # zeigt "daemon start ..." + Sync-Läufe
+```
+
 # BASISPROJEKT: ICD_APP Example (Intermittently Connected Device)
 
 This example creates a Matter ICD device using the ESP Matter data model. Currently it is available for ESP32-H2 and ESP32-C6.

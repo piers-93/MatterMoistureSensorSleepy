@@ -1,0 +1,18 @@
+{
+  "modelVersion": {
+    "vid": 65522,
+    "pid": 32769,
+    "softwareVersion": 3,
+    "softwareVersionString": "2.1",
+    "cdVersionNumber": 1,
+    "firmwareInformation": "",
+    "softwareVersionValid": true,
+    "otaUrl": "https://nextcloud.piers.selfhost.eu/s/EHPAWCnMKwPMe59/download",
+    "otaFileSize": "1628175",
+    "otaChecksum": "nIEAhpY8Hw27kmEVNxYUjMFDprFyImZHmhc4RCAcIKM=",
+    "otaChecksumType": 1,
+    "minApplicableSoftwareVersion": 1,
+    "maxApplicableSoftwareVersion": 2,
+    "releaseNotesUrl": ""
+  }
+}

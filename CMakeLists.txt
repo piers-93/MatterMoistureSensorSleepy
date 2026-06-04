@@ -6,7 +6,7 @@ if(NOT DEFINED ENV{ESP_MATTER_PATH})
     message(FATAL_ERROR "Please set ESP_MATTER_PATH to the path of esp-matter repo")
 endif(NOT DEFINED ENV{ESP_MATTER_PATH})
 
-// "Firmware Version" in Homeassistant, PROJECT_VER_NUMBER is used for OTA updates, PROJECT_VER is used for display in Homeassistant and the Matter Commissioning App. Both are defined here to ensure they are always in sync. 
+# "Firmware Version" in Homeassistant, PROJECT_VER_NUMBER is used for OTA updates, PROJECT_VER is used for display in Homeassistant and the Matter Commissioning App. Both are defined here to ensure they are always in sync. 
 set(PROJECT_VER "2.1")
 set(PROJECT_VER_NUMBER 3)
 
