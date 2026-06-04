@@ -141,6 +141,17 @@ ps aux | grep sync_matter_ota   # eine Zeile mit "daemon"
 tail -f /config/matter_ota.log  # zeigt "daemon start ..." + Sync-Läufe
 ```
 
+**6. Matter-Server App Konfiguration**
+
+Unter "Konfiguration" ein "Extra Matter Server argument" angeben:
+```bash
+--ota-provider-dir /config/ota
+```
+
+
+Um den Update Suchvorgang anzustoßen, unter Einstellungen->System->Updates den Refresh Button klicken.  
+Das Skript startet den Matter-Server neu, falls eine neue Datei kopiert wurde.
+
 # BASISPROJEKT: ICD_APP Example (Intermittently Connected Device)
 
 This example creates a Matter ICD device using the ESP Matter data model. Currently it is available for ESP32-H2 and ESP32-C6.

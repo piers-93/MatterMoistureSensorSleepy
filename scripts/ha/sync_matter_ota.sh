@@ -38,7 +38,7 @@ log() {
 }
 
 sync_once() {
-    local tmp new old
+    local tmp new old sw_ver target
     tmp=$(mktemp)
     if ! curl -fsSL "$JSON_URL" -o "$tmp"; then
         log "ERROR: download fehlgeschlagen ($JSON_URL)"
@@ -53,29 +53,43 @@ sync_once() {
         return 1
     fi
 
+    # Versionsnummer aus JSON ziehen (fuer eindeutigen Dateinamen im Container)
+    sw_ver=$(sed -nE 's/.*"softwareVersion"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$tmp" \
+             | head -n1)
+    if [[ -z "$sw_ver" ]]; then
+        log "ERROR: konnte softwareVersion nicht aus JSON lesen"
+        rm -f "$tmp"
+        return 1
+    fi
+    target="icd_app-v${sw_ver}.json"
+
     new=$(sha256sum "$tmp" | awk '{print $1}')
-    old=$(docker exec "$ADDON_CONTAINER" sha256sum "$ADDON_OTA_DIR/$JSON_NAME" 2>/dev/null \
+    old=$(docker exec "$ADDON_CONTAINER" sha256sum "$ADDON_OTA_DIR/$target" 2>/dev/null \
           | awk '{print $1}' || true)
 
     if [[ "$new" == "${old:-}" ]]; then
-        log "no change (sha=$new)"
+        log "no change (v=$sw_ver sha=$new)"
         rm -f "$tmp"
         return 0
     fi
 
-    log "change detected: old=${old:-none} new=$new"
+    log "change detected: v=$sw_ver old=${old:-none} new=$new"
 
-    docker exec "$ADDON_CONTAINER" mkdir -p "$ADDON_OTA_DIR"
-    docker cp "$tmp" "$ADDON_CONTAINER:$ADDON_OTA_DIR/$JSON_NAME"
+    # Alte JSONs wegraeumen, damit der Loader nicht durch alte Versionen
+    # verwirrt wird und der Ordner sauber bleibt.
+    docker exec "$ADDON_CONTAINER" sh -c \
+        "mkdir -p $ADDON_OTA_DIR && rm -f $ADDON_OTA_DIR/icd_app-v*.json $ADDON_OTA_DIR/icd_app.json"
+
+    docker cp "$tmp" "$ADDON_CONTAINER:$ADDON_OTA_DIR/$target"
     rm -f "$tmp"
 
-    log "copied to $ADDON_CONTAINER:$ADDON_OTA_DIR/$JSON_NAME"
+    log "copied to $ADDON_CONTAINER:$ADDON_OTA_DIR/$target"
 
-    # WICHTIG: 'restart' reicht beim Matter-Server-Add-on NICHT,
-    # Loader laeuft nur bei echtem Prozess-Start. Daher stop+start.
-    log "addon stop+start: $ADDON_SLUG"
-    ha apps stop  "$ADDON_SLUG" >/dev/null
-    ha apps start "$ADDON_SLUG" >/dev/null
+    # Da wir die JSON unter einem NEUEN Dateinamen (icd_app-vN.json) ablegen,
+    # reicht ein simples 'restart'. (Editiert man dieselbe Datei, braucht der
+    # Matter-Server-Loader ein echtes stop+start - hier nicht der Fall.)
+    log "addon restart: $ADDON_SLUG"
+    ha apps restart "$ADDON_SLUG" >/dev/null
     log "addon ready"
 }
 
