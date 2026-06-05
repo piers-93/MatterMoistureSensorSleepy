@@ -29,13 +29,17 @@ OUT_DIR="${OUT_DIR:-out/ota}"
 # OTA-URL, die in die JSON geschrieben wird. Default: dein Nextcloud-Share.
 # Wenn du die Datei dort einfach ueberschreibst, muss diese URL nie geaendert
 # werden – die JSON aktualisiert sich beim naechsten Release-Lauf von selbst.
-OTA_URL_DEFAULT="https://nextcloud.piers.selfhost.eu/s/EHPAWCnMKwPMe59/download"
+
+OTA_URL_DEFAULT="https://github.com/piers-93/MatterMoistureSensorSleepy/releases/latest/download/icd_app.ota"
 OTA_URL="${OTA_URL:-$OTA_URL_DEFAULT}"
 
 # Min/Max Range fuer "auf welche installierte Version darf upgedated werden"
 MIN_APPLICABLE="${MIN_APPLICABLE:-1}"
 # Wird unten automatisch auf (softwareVersion - 1) gesetzt, falls leer.
 MAX_APPLICABLE="${MAX_APPLICABLE:-}"
+
+# Link zu Release-Notes (optional, wird in QueryImageResponse mitgeschickt).
+RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://github.com/piers-93/MatterMoistureSensorSleepy/releases/latest}"
 
 # Deployment-Ziel (optional)
 HA_HOST="${HA_HOST:-}"
@@ -143,7 +147,7 @@ cat > "$JSON_FILE" <<EOF
     "otaChecksumType": 1,
     "minApplicableSoftwareVersion": $MIN_APPLICABLE,
     "maxApplicableSoftwareVersion": $MAX_APPLICABLE,
-    "releaseNotesUrl": ""
+    "releaseNotesUrl": "$RELEASE_NOTES_URL"
   }
 }
 EOF
