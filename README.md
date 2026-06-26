@@ -84,69 +84,124 @@ usbipd bind --busid <busid>
 
 -gesamt etwa 30uA im Light Sleep, gemessen in der Akkuzuleitung.
 
-## Matter-OTA-Auto-Sync auf Home Assistant einrichten
-Voraussetzungen:
-HA mit Advanced SSH & Web Terminal-Add-on (Protection Mode = OFF),
-Matter-Server-Add-on läuft (Container: addon_core_matter_server),
-icd_app.ota und icd_app.json als Assets eines GitHub-Releases hochgeladen (öffentliches Repo)  
+# Matter-OTA-Auto-Sync auf Home Assistant einrichten
 
-**1. Sync-Skript anlegen**  
+Diese Anleitung richtet einen Daemon auf Home Assistant ein, der regelmäßig
+das neueste `.ota`-Firmware-Release vom GitHub-Repository abholt und an den
+Matter-Server weitergibt. Sobald eine neue Version online ist, bekommen die
+Matter-Geräte sie beim nächsten Wake-up automatisch angeboten.
 
-Im SSH-Add-on-Terminal:
+## Voraussetzungen auf Home Assistant
 
-```bash
-nano /config/sync_matter_ota.sh
-```
-Inhalt einfügen (scripts/ha/sync_matter_ota.sh).
-Speichern (Strg+X, y), ausführbar machen:
-```bash
-chmod +x /config/sync_matter_ota.sh
-```
-**2. Einmal manuell testen**
-```bash
-bash /config/sync_matter_ota.sh once
-cat /config/matter_ota.log
-```
-Erwartet: change detected ... copied ... addon ready. Gegencheck:
+Folgende Add-ons müssen installiert und gestartet sein:
 
-```bash
-docker exec addon_core_matter_server cat /config/ota/icd_app.json
+1. **Advanced SSH & Web Terminal** (zum Anlegen der Skripte mit `nano` und für den Daemon)
+2. **Matter Server** (Version 9.0 oder neuer)
+
+### Matter-Server konfigurieren
+
+Im **Matter Server** Add-on unter *Configuration* setzen:
+
+```yaml
+enable_test_net_dcl: true
+Extra Matter Server arguments: --ota-provider-dir /config/ota
 ```
 
-**3. Daemon-Starter anlegen**
+Hinweis: `ota_provider_dir` zeigt aus Sicht des Add-on-Containers auf
+`/data/ota` — vom Host bzw. von der SSH-Konsole aus erreichbar als
+`/config/ota`. **Beides ist derselbe Ordner.**
+
+
+## Skripte anlegen (z.B. SSH-Terminal mit nano)
+
+Im **Advanced SSH & Web Terminal** Add-on werden beide Skripte mit `nano`
+direkt angelegt. Vorteil: keine CRLF-Probleme, `chmod +x` geht im selben
+Rutsch.
+
+### Datei 1: `/config/matter/ota/sync_matter_ota.sh`
+
+```bash
+mkdir -p /config/matter/ota
+nano /config/matter/ota/sync_matter_ota.sh
+```
+
+Inhalt der Datei [sync_matter_ota.sh](sync_matter_ota.sh) komplett
+hineinkopieren, dann `Ctrl+O`, `Enter`, `Ctrl+X`.
+
+
+### Datei 2: `/config/start_matter_sync.sh`
+
 ```bash
 nano /config/start_matter_sync.sh
 ```
 
-```sh
-#!/bin/sh
-pkill -f sync_matter_ota.sh
-nohup /config/sync_matter_ota.sh daemon >/dev/null 2>&1 &
-```
+Inhalt der Datei [start_matter_sync.sh](start_matter_sync.sh) komplett
+hineinkopieren, dann `Ctrl+O`, `Enter`, `Ctrl+X`.
+
+### Ausführbar machen
 
 ```bash
-chmod +x /config/start_matter_sync.sh
+chmod +x /config/matter/ota/sync_matter_ota.sh /config/start_matter_sync.sh
 ```
 
-**4. Beim Add-on-Start automatisch starten**
-HA → Einstellungen → Add-ons → Advanced SSH & Web Terminal → Configuration → bei init_commands einen Eintrag hinzufügen:
+## Funktionstest
+
+```bash
+# Einmaliger Lauf — holt die Datei, kopiert sie rein, restartet Matter-Server
+/config/matter/ota/sync_matter_ota.sh once
+
+# Log ansehen
+tail -n 20 /config/matter_ota.log
+```
+
+Erwartete Ausgabe:
+
+```
+... change detected: old=none new=<sha>
+... copied to addon_core_matter_server:/config/ota/icd_app.ota
+... addon restart: core_matter_server
+... ok: import bestaetigt (icd_app.ota wurde von matter.js uebernommen)
+```
+
+Wenn da `WARN: ... noch da` steht, hat matter.js den Import abgelehnt — dann
+Matter-Server-Logs prüfen.
+
+## Daemon dauerhaft starten
+
 ```bash
 /config/start_matter_sync.sh
-```
-Speichern → Add-on Restart.
 
-**5. Prüfen**
-```bash
-ps aux | grep sync_matter_ota   # eine Zeile mit "daemon"
-tail -f /config/matter_ota.log  # zeigt "daemon start ..." + Sync-Läufe
+# Verifizieren, dass er läuft
+ps -ef | grep sync_matter_ota | grep -v grep
 ```
 
-**6. Matter-Server App Konfiguration**
+Erwartet eine Zeile wie:
 
-Unter "Konfiguration" ein "Extra Matter Server argument" angeben:
-```bash
---ota-provider-dir /config/ota
 ```
+root  1234  1  0 17:22 ? 00:00:00 /bin/bash /config/matter/ota/sync_matter_ota.sh daemon
+```
+
+## Autostart nach HA-Reboot
+
+Im Add-on **Advanced SSH & Web Terminal** unter *Configuration* in den
+`init_commands` ergänzen:
+
+```yaml
+init_commands:
+  - /config/start_matter_sync.sh
+```
+
+Add-on einmal neu starten. Ab jetzt überlebt der Daemon jeden HA-Neustart.
+
+## Was passiert ab jetzt automatisch
+
+1. Daemon prüft jede Stunde (`INTERVAL_SEC=3600`), ob auf GitHub eine neue
+   `icd_app.ota` als *Latest Release* liegt
+2. Wenn ja: SHA-256 vergleichen → bei Änderung in den Matter-Server-Container
+   kopieren, Add-on neu starten
+3. Matter-Server scannt beim Boot das OTA-Verzeichnis, übernimmt die Datei
+   intern und löscht sie aus dem Ordner (das ist das Erfolgssignal)
+4. Beim nächsten Wake-up des ICD wird das Update angeboten
 
 
 Um den Update Suchvorgang anzustoßen, unter Einstellungen->System->Updates den Refresh Button klicken.  

@@ -2,17 +2,24 @@
 #
 # release_ota.sh
 #
-# Erzeugt aus build/icd_app.bin eine Matter-OTA-Datei (.ota) und die
-# passende Provider-Metadaten-JSON (.json) fuer den python-matter-server.
+# Erzeugt aus build/icd_app.bin eine Matter-OTA-Datei (.ota) und kopiert sie
+# optional direkt in den Matter-Server-Add-on-Container.
+#
+# WICHTIG (matter.js Server >= 9.0):
+#   - Es werden NUR die *.ota* eingelesen, *.json* werden ignoriert.
+#   - Beim Start des Servers wird die .ota importiert und ANSCHLIESSEND aus
+#     /config/ota/ GELOESCHT (intern in den Server-Storage uebernommen).
+#   - VID/PID/SoftwareVersion werden direkt aus dem .ota-Image extrahiert,
+#     daher ist keine separate JSON-Metadatendatei mehr noetig.
+#
 # Liest VID/PID sowie PROJECT_VER / PROJECT_VER_NUMBER automatisch aus
 # CMakeLists.txt, damit nichts mehr von Hand gepflegt werden muss.
 #
-# Optional kopiert das Script die JSON direkt in den Matter-Server-
-# Add-on-Container von Home Assistant (per ssh + docker cp).
-#
 # Beispielnutzung:
-#   scripts/release_ota.sh                # nur .ota + .json lokal erzeugen
+#   scripts/release_ota.sh                # nur .ota lokal erzeugen
+#   scripts/release_ota.sh --build        # vorher idf.py build
 #   HA_HOST=192.168.178.76 HA_USER=piers-93 scripts/release_ota.sh --deploy
+#   scripts/release_ota.sh --all          # build + deploy + restart
 #
 set -euo pipefail
 
@@ -25,21 +32,6 @@ VID="${VID:-0xFFF2}"
 PID="${PID:-0x8001}"
 BIN_PATH="${BIN_PATH:-build/icd_app.bin}"
 OUT_DIR="${OUT_DIR:-out/ota}"
-
-# OTA-URL, die in die JSON geschrieben wird. Default: dein Nextcloud-Share.
-# Wenn du die Datei dort einfach ueberschreibst, muss diese URL nie geaendert
-# werden – die JSON aktualisiert sich beim naechsten Release-Lauf von selbst.
-
-OTA_URL_DEFAULT="https://github.com/piers-93/MatterMoistureSensorSleepy/releases/latest/download/icd_app.ota"
-OTA_URL="${OTA_URL:-$OTA_URL_DEFAULT}"
-
-# Min/Max Range fuer "auf welche installierte Version darf upgedated werden"
-MIN_APPLICABLE="${MIN_APPLICABLE:-1}"
-# Wird unten automatisch auf (softwareVersion - 1) gesetzt, falls leer.
-MAX_APPLICABLE="${MAX_APPLICABLE:-}"
-
-# Link zu Release-Notes (optional, wird in QueryImageResponse mitgeschickt).
-RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://github.com/piers-93/MatterMoistureSensorSleepy/releases/latest}"
 
 # Deployment-Ziel (optional)
 HA_HOST="${HA_HOST:-}"
@@ -88,19 +80,8 @@ PROJECT_VER_NUMBER=$(grep -E '^[[:space:]]*set\(PROJECT_VER_NUMBER[[:space:]]+' 
 [[ -n "$PROJECT_VER" && -n "$PROJECT_VER_NUMBER" ]] \
     || { echo "Konnte PROJECT_VER / PROJECT_VER_NUMBER nicht aus CMakeLists.txt lesen" >&2; exit 1; }
 
-if [[ -z "$MAX_APPLICABLE" ]]; then
-    MAX_APPLICABLE=$(( PROJECT_VER_NUMBER - 1 ))
-    [[ "$MAX_APPLICABLE" -lt "$MIN_APPLICABLE" ]] && MAX_APPLICABLE="$MIN_APPLICABLE"
-fi
-
-# Dezimale VID/PID fuer JSON
-VID_DEC=$(printf '%d' "$VID")
-PID_DEC=$(printf '%d' "$PID")
-
 echo "  Projekt-Version : $PROJECT_VER (Number $PROJECT_VER_NUMBER)"
-echo "  VID/PID         : $VID / $PID  (dec $VID_DEC / $PID_DEC)"
-echo "  OTA-URL         : $OTA_URL"
-echo "  Applicable      : [$MIN_APPLICABLE .. $MAX_APPLICABLE]"
+echo "  VID/PID         : $VID / $PID"
 echo
 
 # ---- Optional: Build -------------------------------------------------------
@@ -113,7 +94,6 @@ fi
 
 mkdir -p "$OUT_DIR"
 OTA_FILE="$OUT_DIR/icd_app-v${PROJECT_VER_NUMBER}.ota"
-JSON_FILE="$OUT_DIR/icd_app-v${PROJECT_VER_NUMBER}.json"
 
 # ---- OTA-Image erzeugen ----------------------------------------------------
 echo ">> ota_image_tool create -> $OTA_FILE"
@@ -123,45 +103,21 @@ python3 "$OTA_TOOL" create \
     -da sha256 \
     "$BIN_PATH" "$OTA_FILE"
 
-# ---- Groesse + SHA-256 (Base64) --------------------------------------------
+# ---- Groesse + SHA-256 (Base64) zur Info -----------------------------------
 OTA_SIZE=$(stat -c%s "$OTA_FILE")
 OTA_SHA256_B64=$(openssl dgst -sha256 -binary "$OTA_FILE" | base64)
 
 echo "  Size            : $OTA_SIZE"
 echo "  SHA-256 (b64)   : $OTA_SHA256_B64"
 
-# ---- JSON erzeugen ---------------------------------------------------------
-cat > "$JSON_FILE" <<EOF
-{
-  "modelVersion": {
-    "vid": $VID_DEC,
-    "pid": $PID_DEC,
-    "softwareVersion": $PROJECT_VER_NUMBER,
-    "softwareVersionString": "$PROJECT_VER",
-    "cdVersionNumber": 1,
-    "firmwareInformation": "",
-    "softwareVersionValid": true,
-    "otaUrl": "$OTA_URL",
-    "otaFileSize": "$OTA_SIZE",
-    "otaChecksum": "$OTA_SHA256_B64",
-    "otaChecksumType": 1,
-    "minApplicableSoftwareVersion": $MIN_APPLICABLE,
-    "maxApplicableSoftwareVersion": $MAX_APPLICABLE,
-    "releaseNotesUrl": "$RELEASE_NOTES_URL"
-  }
-}
-EOF
-
-echo ">> JSON geschrieben: $JSON_FILE"
-
 # ---- Optional: in HA-Container deployen ------------------------------------
 if [[ "$DEPLOY" -eq 1 ]]; then
     [[ -n "$HA_HOST" && -n "$HA_USER" ]] \
         || { echo "Fuer --deploy bitte HA_HOST und HA_USER setzen" >&2; exit 1; }
 
-    REMOTE_TMP="/tmp/$(basename "$JSON_FILE")"
-    echo ">> scp $JSON_FILE -> $HA_USER@$HA_HOST:$REMOTE_TMP"
-    scp "$JSON_FILE" "$HA_USER@$HA_HOST:$REMOTE_TMP"
+    REMOTE_TMP="/tmp/$(basename "$OTA_FILE")"
+    echo ">> scp $OTA_FILE -> $HA_USER@$HA_HOST:$REMOTE_TMP"
+    scp "$OTA_FILE" "$HA_USER@$HA_HOST:$REMOTE_TMP"
 
     echo ">> docker cp $REMOTE_TMP -> $HA_CONTAINER:$HA_OTA_DIR/"
     ssh "$HA_USER@$HA_HOST" \
@@ -172,31 +128,28 @@ if [[ "$DEPLOY" -eq 1 ]]; then
 
     if [[ "$DO_RESTART" -ne 1 ]]; then
         echo
-        echo "Hinweis: Matter-Server-Add-on neu starten, damit die JSON eingelesen wird."
+        echo "Hinweis: Matter-Server-Add-on neu starten, damit die .ota importiert wird."
         echo "         (oder --restart zusaetzlich mitgeben)"
+        echo "Nach erfolgreichem Import wird die Datei aus $HA_OTA_DIR/ entfernt."
     fi
 fi
 
-# ---- Optional: Matter-Server-Add-on per Supervisor-API neu starten ---------
+# ---- Optional: Matter-Server-Add-on neu starten ----------------------------
 if [[ "$DO_RESTART" -eq 1 ]]; then
-    # WICHTIG: 'restart' reicht beim Matter-Server-Add-on NICHT, weil der
-    # JSON-OTA-Loader nur beim echten Prozess-Start laeuft. Daher stop+start.
+    # matter.js scannt /config/ota/ nur beim Start. 'ha apps restart' macht
+    # intern stop+start - reicht hier.
     #
     # Variante A: HA REST API von aussen (braucht HA_API_URL + HA_TOKEN)
     if [[ -n "$HA_API_URL" && -n "$HA_TOKEN" ]]; then
-        echo ">> Stop+Start per HA REST API: $HA_API_URL"
+        echo ">> Restart per HA REST API: $HA_API_URL"
         curl -fsSL -X POST \
             -H "Authorization: Bearer $HA_TOKEN" \
-            "$HA_API_URL/api/hassio/addons/$HA_ADDON_SLUG/stop" >/dev/null
-        curl -fsSL -X POST \
-            -H "Authorization: Bearer $HA_TOKEN" \
-            "$HA_API_URL/api/hassio/addons/$HA_ADDON_SLUG/start" >/dev/null
+            "$HA_API_URL/api/hassio/addons/$HA_ADDON_SLUG/restart" >/dev/null
         echo "   ok"
     # Variante B: per SSH ueber Supervisor-Socket (braucht HA_HOST/HA_USER)
     elif [[ -n "$HA_HOST" && -n "$HA_USER" ]]; then
-        echo ">> Stop+Start per ssh: ha addons stop/start $HA_ADDON_SLUG"
-        ssh "$HA_USER@$HA_HOST" \
-            "ha addons stop $HA_ADDON_SLUG && ha addons start $HA_ADDON_SLUG"
+        echo ">> Restart per ssh: ha apps restart $HA_ADDON_SLUG"
+        ssh "$HA_USER@$HA_HOST" "ha apps restart $HA_ADDON_SLUG"
     else
         echo "Fuer --restart bitte entweder HA_API_URL + HA_TOKEN, oder HA_HOST + HA_USER setzen" >&2
         exit 1
@@ -205,8 +158,9 @@ fi
 
 echo
 echo "Fertig."
-echo "  -> .ota nach $OTA_URL hochladen (sofern noch nicht passiert),"
+echo "  -> $OTA_FILE bei GitHub als Release-Asset 'icd_app.ota' anhaengen"
+echo "     (Release als 'Latest' markieren - der HA-Sync-Daemon zieht es dann automatisch)."
 if [[ "$DO_RESTART" -ne 1 ]]; then
     echo "  -> Matter-Server-Add-on neu starten,"
 fi
-echo "  -> in HA: Einstellungen -> System -> Nach Updates suchen."
+echo "  -> HA findet das Update beim naechsten Device-QueryImage."

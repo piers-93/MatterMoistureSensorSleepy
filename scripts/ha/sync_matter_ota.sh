@@ -3,24 +3,31 @@
 # sync_matter_ota.sh
 #
 # Laeuft im Advanced SSH & Web Terminal Add-on von Home Assistant.
-# Holt regelmaessig eine OTA-Provider-JSON von einer URL (z.B. Nextcloud-Share)
-# und kopiert sie in den Matter-Server-Add-on-Container, sobald sich der
-# SHA-256 geaendert hat. Macht anschliessend stop+start, damit der Loader
-# die neue Datei wirklich einliest.
+# Holt regelmaessig eine Matter-OTA-Datei (.ota) von einer URL (z.B. GitHub
+# Release-Asset) und legt sie in den Matter-Server-Add-on-Container, sobald
+# sich der SHA-256 geaendert hat. Startet anschliessend das Add-on neu, damit
+# matter.js die Datei beim Boot scannt, importiert und intern uebernimmt.
 #
-# Pfad in HA: /config/sync_matter_ota.sh
+# WICHTIG (matter.js Server >= 9.0):
+#   - Es werden NUR *.ota* eingelesen, *.json* werden ignoriert.
+#   - Nach erfolgreichem Import LOESCHT matter.js die Datei aus /config/ota/.
+#   - Wir koennen daher nicht im Container nachschauen, was zuletzt drin lag;
+#     stattdessen merken wir uns die letzte importierte SHA-256 in einem
+#     State-File auf /config.
+#
+# Pfad in HA: /homeassistant/matter/ota/sync_matter_ota.sh
 #
 # Aufruf einmalig (als Daemon im Hintergrund) ueber Add-on init_commands:
-#   nohup /config/sync_matter_ota.sh daemon >> /config/matter_ota.log 2>&1 &
+#   nohup /homeassistant/matter/ota/sync_matter_ota.sh daemon >> /homeassistant/matter/ota/matter_ota.log 2>&1 &
 #
 # Oder manuell zum Testen:
-#   bash -x /config/sync_matter_ota.sh once
+#   bash -x /homeassistant/matter/ota/sync_matter_ota.sh once
 #
 set -euo pipefail
 
 # ---- Konfiguration ---------------------------------------------------------
-JSON_URL="${JSON_URL:-https://github.com/piers-93/MatterMoistureSensorSleepy/releases/latest/download/icd_app.json}"
-JSON_NAME="${JSON_NAME:-icd_app.json}"
+OTA_URL="${OTA_URL:-https://github.com/piers-93/MatterMoistureSensorSleepy/releases/latest/download/icd_app.ota}"
+OTA_NAME="${OTA_NAME:-icd_app.ota}"
 
 ADDON_CONTAINER="${ADDON_CONTAINER:-addon_core_matter_server}"
 ADDON_SLUG="${ADDON_SLUG:-core_matter_server}"
@@ -28,6 +35,7 @@ ADDON_OTA_DIR="${ADDON_OTA_DIR:-/config/ota}"
 
 INTERVAL_SEC="${INTERVAL_SEC:-3600}"   # 60 min Default
 LOG_FILE="${LOG_FILE:-/config/matter_ota.log}"
+STATE_FILE="${STATE_FILE:-/config/.matter_ota_last_sha}"
 
 # ---- Helpers ---------------------------------------------------------------
 log() {
@@ -38,59 +46,62 @@ log() {
 }
 
 sync_once() {
-    local tmp new old sw_ver target
+    local tmp new old
     tmp=$(mktemp)
-    if ! curl -fsSL "$JSON_URL" -o "$tmp"; then
-        log "ERROR: download fehlgeschlagen ($JSON_URL)"
+    if ! curl -fsSL "$OTA_URL" -o "$tmp"; then
+        log "ERROR: download fehlgeschlagen ($OTA_URL)"
         rm -f "$tmp"
         return 1
     fi
 
-    # Sanity-Check: ist es ueberhaupt gueltige OTA-JSON?
-    if ! grep -q '"modelVersion"' "$tmp"; then
-        log "ERROR: heruntergeladene Datei enthaelt kein 'modelVersion' Feld"
+    # Sanity-Check: nicht leer, plausible Mindestgroesse (~100 KB).
+    # Die echte Format-Validierung macht matter.js beim Import - wir merken
+    # an "Datei wurde nicht geloescht", wenn was schiefging.
+    local size
+    size=$(stat -c%s "$tmp" 2>/dev/null || echo 0)
+    if [[ "$size" -lt 102400 ]]; then
+        log "ERROR: heruntergeladene Datei zu klein ($size Bytes - HTML-Fehlerseite?)"
         rm -f "$tmp"
         return 1
     fi
-
-    # Versionsnummer aus JSON ziehen (fuer eindeutigen Dateinamen im Container)
-    sw_ver=$(sed -nE 's/.*"softwareVersion"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' "$tmp" \
-             | head -n1)
-    if [[ -z "$sw_ver" ]]; then
-        log "ERROR: konnte softwareVersion nicht aus JSON lesen"
-        rm -f "$tmp"
-        return 1
-    fi
-    target="icd_app-v${sw_ver}.json"
 
     new=$(sha256sum "$tmp" | awk '{print $1}')
-    old=$(docker exec "$ADDON_CONTAINER" sha256sum "$ADDON_OTA_DIR/$target" 2>/dev/null \
-          | awk '{print $1}' || true)
+    old=""
+    [[ -f "$STATE_FILE" ]] && old=$(<"$STATE_FILE")
 
-    if [[ "$new" == "${old:-}" ]]; then
-        log "no change (v=$sw_ver sha=$new)"
+    if [[ "$new" == "$old" ]]; then
+        log "no change (sha=$new)"
         rm -f "$tmp"
         return 0
     fi
 
-    log "change detected: v=$sw_ver old=${old:-none} new=$new"
+    log "change detected: old=${old:-none} new=$new"
 
-    # Alte JSONs wegraeumen, damit der Loader nicht durch alte Versionen
-    # verwirrt wird und der Ordner sauber bleibt.
+    # Alte .ota-Reste wegraeumen (matter.js loescht eigene Files normalerweise,
+    # aber wir koennten z.B. nach einem fehlgeschlagenen Import noch was liegen
+    # haben - sicherheitshalber Ordner vorher leeren).
     docker exec "$ADDON_CONTAINER" sh -c \
-        "mkdir -p $ADDON_OTA_DIR && rm -f $ADDON_OTA_DIR/icd_app-v*.json $ADDON_OTA_DIR/icd_app.json"
+        "mkdir -p $ADDON_OTA_DIR && rm -f $ADDON_OTA_DIR/*.ota" || true
 
-    docker cp "$tmp" "$ADDON_CONTAINER:$ADDON_OTA_DIR/$target"
+    docker cp "$tmp" "$ADDON_CONTAINER:$ADDON_OTA_DIR/$OTA_NAME"
     rm -f "$tmp"
 
-    log "copied to $ADDON_CONTAINER:$ADDON_OTA_DIR/$target"
+    log "copied to $ADDON_CONTAINER:$ADDON_OTA_DIR/$OTA_NAME"
 
-    # Da wir die JSON unter einem NEUEN Dateinamen (icd_app-vN.json) ablegen,
-    # reicht ein simples 'restart'. (Editiert man dieselbe Datei, braucht der
-    # Matter-Server-Loader ein echtes stop+start - hier nicht der Fall.)
     log "addon restart: $ADDON_SLUG"
     ha apps restart "$ADDON_SLUG" >/dev/null
-    log "addon ready"
+
+    # Kurz warten, dann pruefen ob die Datei vom Server importiert (= geloescht)
+    # wurde - schoenes Erfolgs-/Misserfolg-Signal.
+    sleep 20
+    if docker exec "$ADDON_CONTAINER" test -f "$ADDON_OTA_DIR/$OTA_NAME"; then
+        log "WARN: $OTA_NAME ist noch da - matter.js hat sie evtl. nicht importiert (Logs pruefen)"
+    else
+        log "ok: import bestaetigt ($OTA_NAME wurde von matter.js uebernommen)"
+        # Erst nach erfolgreichem Import als 'bekannt' markieren - so versucht
+        # der Daemon es beim naechsten Tick nochmal, falls Import schiefging.
+        printf '%s\n' "$new" > "$STATE_FILE"
+    fi
 }
 
 # ---- Main ------------------------------------------------------------------
@@ -101,7 +112,12 @@ case "$MODE" in
         sync_once
         ;;
     daemon)
-        log "daemon start (interval=${INTERVAL_SEC}s, url=$JSON_URL)"
+        log "daemon start (interval=${INTERVAL_SEC}s, url=$OTA_URL)"
+        # Boot-Puffer: nach einem Host-Reboot startet das SSH-Add-on
+        # (und damit dieser Daemon via init_commands) eventuell schneller
+        # als der Docker-/Supervisor-Dienst bzw. das Matter-Server-Add-on.
+        # 30s warten, damit der erste sync_once nicht ins Leere laeuft.
+        sleep "${BOOT_DELAY_SEC:-30}"
         while true; do
             sync_once || true
             sleep "$INTERVAL_SEC"
