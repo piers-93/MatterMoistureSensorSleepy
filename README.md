@@ -207,7 +207,7 @@ Add-on einmal neu starten. Ab jetzt überlebt der Daemon jeden HA-Neustart.
 Um den Update Suchvorgang anzustoßen, unter Einstellungen->System->Updates den Refresh Button klicken.  
 Das Skript startet den Matter-Server neu, falls eine neue Datei kopiert wurde.
 
-# ICD bauen
+# OTA bauen
 ```yaml
 source ~/esp-idf/export.sh
 source ~/esp-matter/export.sh
