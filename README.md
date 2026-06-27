@@ -207,6 +207,31 @@ Add-on einmal neu starten. Ab jetzt überlebt der Daemon jeden HA-Neustart.
 Um den Update Suchvorgang anzustoßen, unter Einstellungen->System->Updates den Refresh Button klicken.  
 Das Skript startet den Matter-Server neu, falls eine neue Datei kopiert wurde.
 
+# ICD bauen
+```yaml
+source ~/esp-idf/export.sh
+source ~/esp-matter/export.sh
+```
+In CMakeLists.txt die Version hochzählen:
+```yaml
+set(PROJECT_VER         "1.0.4")
+set(PROJECT_VER_NUMBER  4)
+```
+```yaml
+./scripts/release_ota.sh --build
+```
+(Wenn schon gebaut wurde ohne --build)
+
+<br>
+<br>
+<br>
+<br>
+<br>
+
+---
+
+<br>
+
 # BASISPROJEKT: ICD_APP Example (Intermittently Connected Device)
 
 This example creates a Matter ICD device using the ESP Matter data model. Currently it is available for ESP32-H2 and ESP32-C6.
