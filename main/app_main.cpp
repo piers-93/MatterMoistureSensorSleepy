@@ -15,6 +15,7 @@
 
 #include <esp_matter.h>
 #include <esp_matter_ota.h>
+#include <clusters/SoilMeasurement/Attributes.h>
 
 #include <common_macros.h>
 #include <app_priv.h>
@@ -37,6 +38,19 @@
  * TemperatureMeasurementCluster server (the legacy attribute::update() path is
  * not visible to the new cluster's ReadAttribute()). */
 extern "C" int esp_matter_temperature_measurement_set_measured_value(uint16_t endpoint_id, int16_t value);
+
+/* Soil Moisture (Matter SoilMeasurement cluster). These setters live in the esp-matter
+ * data_model_provider soil_measurement integration. The measurement limits MUST be set
+ * before esp_matter::start(), otherwise the cluster init aborts. Likewise the measured
+ * value must be pushed to the new cluster server (Ember update is invisible to it). */
+namespace chip::app::Clusters::SoilMeasurement {
+CHIP_ERROR SetSoilMoistureMeasuredValue(
+    chip::EndpointId endpointId,
+    const Attributes::SoilMoistureMeasuredValue::TypeInfo::Type &soilMoistureMeasuredValue);
+void SetSoilMoistureLimits(
+    chip::EndpointId endpointId,
+    const Attributes::SoilMoistureMeasurementLimits::TypeInfo::Type &soilMoistureLimits);
+}
 
 static const char *TAG = "app_main";
 
@@ -274,19 +288,21 @@ static void perform_measurement(intptr_t)
     
     /* Read moisture sensor (sensor will be powered on/off inside this function) */
     float moisture = app_driver_get_moisture_percentage();
-    
-    /* Convert to Matter format (0.01% units): 45.7% → 4570 */
-    uint16_t measured_value = (uint16_t)(moisture * 100.0f);
-    
-    /* Update Matter attribute */
-    esp_matter_attr_val_t val = esp_matter_nullable_uint16(measured_value);
-    esp_err_t update_err = attribute::update(moisture_endpoint_id, RelativeHumidityMeasurement::Id,
-                     RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, &val);
-    
-    if (update_err == ESP_OK) {
-        ESP_LOGI(TAG, "Updated moisture: %.1f%% (raw=%u)", moisture, measured_value);
+
+    /* SoilMoistureMeasuredValue is a Percent (uint8, 0-100) */
+    uint8_t measured_value = (uint8_t)(moisture + 0.5f);
+    if (measured_value > 100) measured_value = 100;
+
+    /* SoilMeasurement is a new-style ServerCluster (not backed by Ember storage),
+     * so the value must be set directly on the cluster server. */
+    chip::app::DataModel::Nullable<chip::Percent> soil_nv;
+    soil_nv.SetNonNull(measured_value);
+    CHIP_ERROR soil_rc = SoilMeasurement::SetSoilMoistureMeasuredValue(moisture_endpoint_id, soil_nv);
+
+    if (soil_rc == CHIP_NO_ERROR) {
+        ESP_LOGI(TAG, "Updated soil moisture: %u%%", measured_value);
     } else {
-        ESP_LOGE(TAG, "Failed to update moisture attribute, err: %d", update_err);
+        ESP_LOGE(TAG, "Failed to update soil moisture, rc=%" CHIP_ERROR_FORMAT, soil_rc.Format());
     }
     
     /* Read battery voltage */
@@ -412,13 +428,30 @@ extern "C" void app_main()
     node_t *node = node::create(&node_config, app_attribute_update_cb, app_identification_cb);
     ABORT_APP_ON_FAILURE(node != nullptr, ESP_LOGE(TAG, "Failed to create Matter node"));
 
-    /* Create humidity sensor endpoint (we use RelativeHumidityMeasurement cluster for soil moisture) */
-    humidity_sensor::config_t sensor_config;
-    endpoint_t *app_endpoint = humidity_sensor::create(node, &sensor_config, ENDPOINT_FLAG_NONE, NULL);
-    ABORT_APP_ON_FAILURE(app_endpoint != nullptr, ESP_LOGE(TAG, "Failed to create humidity sensor endpoint"));
-    
+    /* Create Soil Sensor endpoint (Matter SoilMeasurement cluster, device type 0x0045) */
+    soil_sensor::config_t sensor_config;
+    endpoint_t *app_endpoint = soil_sensor::create(node, &sensor_config, ENDPOINT_FLAG_NONE, NULL);
+    ABORT_APP_ON_FAILURE(app_endpoint != nullptr, ESP_LOGE(TAG, "Failed to create soil sensor endpoint"));
+
     moisture_endpoint_id = endpoint::get_id(app_endpoint);
-    ESP_LOGI(TAG, "Moisture sensor endpoint created with ID: %d", moisture_endpoint_id);
+    ESP_LOGI(TAG, "Soil moisture sensor endpoint created with ID: %d", moisture_endpoint_id);
+
+    /* Provide the mandatory SoilMoistureMeasurementLimits before esp_matter::start(),
+     * otherwise the SoilMeasurement cluster init aborts. */
+    {
+        using namespace chip::app::Clusters;
+        static const Globals::Structs::MeasurementAccuracyRangeStruct::Type soil_accuracy_ranges[] = {
+            { .rangeMin = 0, .rangeMax = 100, .percentMax = chip::MakeOptional(static_cast<chip::Percent100ths>(10)) }
+        };
+        SoilMeasurement::Attributes::SoilMoistureMeasurementLimits::TypeInfo::Type soil_limits = {
+            .measurementType  = Globals::MeasurementTypeEnum::kSoilMoisture,
+            .measured         = true,
+            .minMeasuredValue = 0,
+            .maxMeasuredValue = 100,
+            .accuracyRanges   = chip::app::DataModel::List<const Globals::Structs::MeasurementAccuracyRangeStruct::Type>(soil_accuracy_ranges),
+        };
+        SoilMeasurement::SetSoilMoistureLimits(moisture_endpoint_id, soil_limits);
+    }
 
     /* Read temperature BEFORE endpoint creation so HA sees a valid MeasuredValue during commissioning.
      * IMPORTANT: if the sensor read returns 0.0 (failed install/race during Matter init), we MUST NOT
@@ -480,11 +513,16 @@ extern "C" void app_main()
     /* Perform initial moisture measurement */
     ESP_LOGI(TAG, "Performing initial moisture measurement...");
     float initial_moisture = app_driver_get_moisture_percentage();
-    uint16_t initial_moisture_value = (uint16_t)(initial_moisture * 100.0f);
-    esp_matter_attr_val_t initial_val = esp_matter_nullable_uint16(initial_moisture_value);
-    attribute::update(moisture_endpoint_id, RelativeHumidityMeasurement::Id,
-                     RelativeHumidityMeasurement::Attributes::MeasuredValue::Id, &initial_val);
-    ESP_LOGI(TAG, "Initial moisture: %.1f%%", initial_moisture);
+    uint8_t initial_moisture_value = (uint8_t)(initial_moisture + 0.5f);
+    if (initial_moisture_value > 100) initial_moisture_value = 100;
+    /* Push the update on the CHIP task: attribute reporting needs the stack lock held. */
+    chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg) {
+        uint8_t v = (uint8_t)arg;
+        chip::app::DataModel::Nullable<chip::Percent> nv;
+        nv.SetNonNull(v);
+        SoilMeasurement::SetSoilMoistureMeasuredValue(moisture_endpoint_id, nv);
+    }, (intptr_t)initial_moisture_value);
+    ESP_LOGI(TAG, "Initial soil moisture: %u%%", initial_moisture_value);
     
     /* Perform initial battery measurement */
     ESP_LOGI(TAG, "Performing initial battery measurement...");
