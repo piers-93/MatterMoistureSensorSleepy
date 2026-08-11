@@ -33,6 +33,11 @@ PID="${PID:-0x8001}"
 BIN_PATH="${BIN_PATH:-build/icd_app.bin}"
 OUT_DIR="${OUT_DIR:-out/ota}"
 
+# Release Notes URL (optional). Wird in den OTA-Header eingebettet und von
+# matter.js beim Import gelesen -> HA zeigt diese URL beim Update-Eintrag an.
+# Default zeigt immer auf den aktuell neuesten GitHub-Release.
+RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://github.com/piers-93/MatterMoistureSensorSleepy/releases/tag/SoilMoisture}"
+
 # Deployment-Ziel (optional)
 HA_HOST="${HA_HOST:-}"
 HA_USER="${HA_USER:-}"
@@ -97,10 +102,17 @@ OTA_FILE="$OUT_DIR/icd_app-v${PROJECT_VER_NUMBER}.ota"
 
 # ---- OTA-Image erzeugen ----------------------------------------------------
 echo ">> ota_image_tool create -> $OTA_FILE"
+OTA_ARGS=(
+    -v "$VID" -p "$PID"
+    -vn "$PROJECT_VER_NUMBER" -vs "$PROJECT_VER"
+    -da sha256
+)
+if [[ -n "$RELEASE_NOTES_URL" ]]; then
+    echo "  Release Notes   : $RELEASE_NOTES_URL"
+    OTA_ARGS+=( -rn "$RELEASE_NOTES_URL" )
+fi
 python3 "$OTA_TOOL" create \
-    -v "$VID" -p "$PID" \
-    -vn "$PROJECT_VER_NUMBER" -vs "$PROJECT_VER" \
-    -da sha256 \
+    "${OTA_ARGS[@]}" \
     "$BIN_PATH" "$OTA_FILE"
 
 # ---- Groesse + SHA-256 (Base64) zur Info -----------------------------------

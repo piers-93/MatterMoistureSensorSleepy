@@ -7,8 +7,8 @@ if(NOT DEFINED ENV{ESP_MATTER_PATH})
 endif(NOT DEFINED ENV{ESP_MATTER_PATH})
 
 # "Firmware Version" in Homeassistant, PROJECT_VER_NUMBER is used for OTA updates, PROJECT_VER is used for display in Homeassistant and the Matter Commissioning App. Both are defined here to ensure they are always in sync. 
-set(PROJECT_VER "2.1")
-set(PROJECT_VER_NUMBER 3)
+set(PROJECT_VER "2.2")
+set(PROJECT_VER_NUMBER 4)
 
 set(ESP_MATTER_PATH $ENV{ESP_MATTER_PATH})
 set(MATTER_SDK_PATH ${ESP_MATTER_PATH}/connectedhomeip/connectedhomeip)

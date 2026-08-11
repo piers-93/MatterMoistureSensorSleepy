@@ -16,6 +16,7 @@
 #include <esp_matter.h>
 #include <esp_matter_ota.h>
 #include <clusters/SoilMeasurement/Attributes.h>
+#include <clusters/Thermostat/Attributes.h>
 
 #include <common_macros.h>
 #include <app_priv.h>
@@ -203,6 +204,22 @@ static esp_timer_handle_t s_fallback_timer = nullptr;
 static void perform_measurement(intptr_t);
 static void fallback_timer_cb(void *);
 
+/* Read the user temperature calibration offset (HA "Temperature offset" number,
+ * backed by the Thermostat LocalTemperatureCalibration attribute in 0.1 °C steps). */
+static float get_temperature_offset_c()
+{
+    attribute_t *attr = attribute::get(temperature_endpoint_id, Thermostat::Id,
+                                       Thermostat::Attributes::LocalTemperatureCalibration::Id);
+    if (!attr) {
+        return 0.0f;
+    }
+    esp_matter_attr_val_t val;
+    if (attribute::get_val(attr, &val) != ESP_OK) {
+        return 0.0f;
+    }
+    return val.val.i8 / 10.0f;
+}
+
 static void fallback_timer_cb(void *)
 {
     ESP_LOGW(TAG, "Fallback timer fired — scheduling measurement");
@@ -325,6 +342,8 @@ static void perform_measurement(intptr_t)
 
     /* Read internal temperature and report via TemperatureMeasurement cluster */
     float temp_celsius = app_driver_get_temperature();
+    /* Apply user calibration offset (HA "Temperature offset" via Thermostat cluster) */
+    temp_celsius += get_temperature_offset_c();
     /* Matter TemperatureMeasurement: int16_t, unit = 0.01 °C */
     int16_t matter_temp = (int16_t)(temp_celsius * 100.0f);
     esp_matter_attr_val_t temp_val = esp_matter_nullable_int16(matter_temp);
@@ -475,7 +494,20 @@ extern "C" void app_main()
     temperature_endpoint_id = endpoint::get_id(temp_endpoint);
     ESP_LOGI(TAG, "Temperature sensor endpoint created with ID: %d", temperature_endpoint_id);
 
-    /* Add PowerSource cluster to root node (endpoint 0) for battery monitoring */
+    /* Add a minimal Thermostat cluster exposing only LocalTemperatureCalibration.
+     * Home Assistant renders this attribute as a "Temperature offset" number (°C) and,
+     * since this endpoint's device type is a sensor (not a thermostat), no climate
+     * entity is created. The value is writable + nonvolatile (persists in NVS) and is
+     * applied to the reported temperature in get_temperature_offset_c(). */
+    cluster_t *thermostat_cluster = cluster::create(temp_endpoint, Thermostat::Id, CLUSTER_FLAG_SERVER);
+    if (thermostat_cluster) {
+        cluster::global::attribute::create_cluster_revision(thermostat_cluster, 9);
+        cluster::global::attribute::create_feature_map(thermostat_cluster, 0);
+        cluster::thermostat::attribute::create_local_temperature_calibration(thermostat_cluster, 0);
+        ESP_LOGI(TAG, "Thermostat LocalTemperatureCalibration added (HA temperature offset)");
+    } else {
+        ESP_LOGE(TAG, "Failed to create Thermostat calibration cluster");
+    }
     endpoint_t *root_endpoint = endpoint::get(node, 0);
     ABORT_APP_ON_FAILURE(root_endpoint != nullptr, ESP_LOGE(TAG, "Failed to get root endpoint"));
 
@@ -547,6 +579,7 @@ extern "C" void app_main()
     int16_t initial_matter_temp = seed_temp_raw; /* same value we seeded into config */
     chip::DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t arg) {
         int16_t v = (int16_t)arg;
+        v += (int16_t)(get_temperature_offset_c() * 100.0f);
         esp_matter_attr_val_t tv = esp_matter_nullable_int16(v);
         esp_err_t e = attribute::update(temperature_endpoint_id, TemperatureMeasurement::Id,
                          TemperatureMeasurement::Attributes::MeasuredValue::Id, &tv);
