@@ -207,6 +207,40 @@ Add-on einmal neu starten. Ab jetzt überlebt der Daemon jeden HA-Neustart.
 Um den Update Suchvorgang anzustoßen, unter Einstellungen->System->Updates den Refresh Button klicken.  
 Das Skript startet den Matter-Server neu, falls eine neue Datei kopiert wurde.
 
+## Änderung auf "app_core_matter_server" (vorher "addon_core_matter_server")
+
+1) Container-Namen im Sync-Skript korrigieren
+```bash
+sed -i 's/addon_core_matter_server/app_core_matter_server/g' /config/matter/ota/sync_matter_ota.sh
+```
+
+2) Ggf. False-Positive-Fix aus dem Workspace nachziehen (nano-Copy oder komplett neu ablegen).
+    Optional, aber empfohlen - der aktuelle Check meldet sonst weiter "ok" auch wenn nix passiert.
+
+3) Alle laufenden Daemons killen
+```bash
+pkill -f sync_matter_ota.sh
+sleep 2
+ps -ef | grep sync_matter_ota | grep -v grep   # muss leer sein
+```
+
+4) Sync-State zuruecksetzen, damit der naechste Lauf die Datei sicher neu einspielt
+```bash
+rm -f /config/.matter_ota_last_sha
+```
+
+5) Einmal manuell testen
+```bash
+/config/matter/ota/sync_matter_ota.sh once
+tail -n 15 /config/matter_ota.log
+```
+
+6) Wenn ok: Daemon dauerhaft starten
+```bash
+/config/start_matter_sync.sh
+ps -ef | grep sync_matter_ota | grep -v grep   # jetzt GENAU eine Zeile
+```
+
 # OTA bauen
 ```yaml
 source ~/esp-idf/export.sh

@@ -29,7 +29,8 @@ set -euo pipefail
 OTA_URL="${OTA_URL:-https://github.com/piers-93/MatterMoistureSensorSleepy/releases/latest/download/icd_app.ota}"
 OTA_NAME="${OTA_NAME:-icd_app.ota}"
 
-ADDON_CONTAINER="${ADDON_CONTAINER:-addon_core_matter_server}"
+# HA 2026.x: Container-Praefix ist "app_" (frueher "addon_").
+ADDON_CONTAINER="${ADDON_CONTAINER:-app_core_matter_server}"
 ADDON_SLUG="${ADDON_SLUG:-core_matter_server}"
 ADDON_OTA_DIR="${ADDON_OTA_DIR:-/config/ota}"
 
@@ -94,6 +95,12 @@ sync_once() {
     # Kurz warten, dann pruefen ob die Datei vom Server importiert (= geloescht)
     # wurde - schoenes Erfolgs-/Misserfolg-Signal.
     sleep 20
+    # Erst pruefen ob der Container ueberhaupt existiert (sonst fuehrt der
+    # naechste `docker exec test -f` zu false-positive "import bestaetigt").
+    if ! docker inspect "$ADDON_CONTAINER" >/dev/null 2>&1; then
+        log "ERROR: Container '$ADDON_CONTAINER' existiert nicht - Import nicht verifizierbar"
+        return 1
+    fi
     if docker exec "$ADDON_CONTAINER" test -f "$ADDON_OTA_DIR/$OTA_NAME"; then
         log "WARN: $OTA_NAME ist noch da - matter.js hat sie evtl. nicht importiert (Logs pruefen)"
     else

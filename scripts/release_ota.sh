@@ -41,7 +41,7 @@ RELEASE_NOTES_URL="${RELEASE_NOTES_URL:-https://github.com/piers-93/MatterMoistu
 # Deployment-Ziel (optional)
 HA_HOST="${HA_HOST:-}"
 HA_USER="${HA_USER:-}"
-HA_CONTAINER="${HA_CONTAINER:-addon_core_matter_server}"
+HA_CONTAINER="${HA_CONTAINER:-app_core_matter_server}"
 HA_OTA_DIR="${HA_OTA_DIR:-/config/ota}"
 # Add-on-Slug fuer Supervisor-API-Restart
 HA_ADDON_SLUG="${HA_ADDON_SLUG:-core_matter_server}"
