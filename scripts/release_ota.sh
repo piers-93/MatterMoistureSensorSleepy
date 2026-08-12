@@ -115,6 +115,25 @@ python3 "$OTA_TOOL" create \
     "${OTA_ARGS[@]}" \
     "$BIN_PATH" "$OTA_FILE"
 
+# ---- Eingebettete Firmware-Version pruefen ---------------------------------
+# Liest die tatsaechlich in der App-Binary (im OTA-Payload) eingebettete
+# esp_app_desc-Version. Diese ist massgeblich fuer die von HA angezeigte
+# SoftwareVersionString - unabhaengig vom OTA-Header. Weicht sie von
+# PROJECT_VER ab, wurde meist ein Rebuild vergessen -> Abbruch.
+EMBEDDED_VER=$(python3 - "$OTA_FILE" <<'PY'
+import sys, struct
+data = open(sys.argv[1], 'rb').read()
+idx = data.find(struct.pack('<I', 0xABCD5432))
+print(data[idx+16:idx+48].split(b'\0', 1)[0].decode(errors='replace') if idx >= 0 else '')
+PY
+)
+echo "  Firmware in OTA : ${EMBEDDED_VER:-<nicht gefunden>}"
+if [[ "$EMBEDDED_VER" != "$PROJECT_VER" ]]; then
+    echo "FEHLER: Eingebettete Firmware-Version ('$EMBEDDED_VER') != PROJECT_VER ('$PROJECT_VER')." >&2
+    echo "       Vermutlich fehlt ein Rebuild. Nutze 'scripts/release_ota.sh --build'." >&2
+    exit 1
+fi
+
 # ---- Groesse + SHA-256 (Base64) zur Info -----------------------------------
 OTA_SIZE=$(stat -c%s "$OTA_FILE")
 OTA_SHA256_B64=$(openssl dgst -sha256 -binary "$OTA_FILE" | base64)
